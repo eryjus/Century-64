@@ -10,6 +10,7 @@
 ;	void TextSetAttr(unsigned char attr);
 ;
 ; Internal functions:
+;   void TextScrollUp(void);
 ;	void TextSetCursor(void);
 ;
 ;    Date     Tracker  Pgmr  Description
@@ -122,7 +123,7 @@ TextSetAttr:
 			mov			rbp,rsp
 			push		rbx								; save rbx, since we will modify
 
-			mov			rax,[rbp+16]					; get the new attr (8-byte aligned)
+			mov			rax,qword [rbp+16]					; get the new attr (8-byte aligned)
 			mov			rbx,qword textAttr				; get the address of the var
 			mov			[rbx],al						; and set the new value
 
@@ -130,6 +131,56 @@ TextSetAttr:
 			pop			rbp								; and caller's frame
 			ret
 
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; void TextScrollUp(void) -- This function will scroll the screen.  For now, I am assuming that
+;                            I will no l onger maintain a status bar at the bottom of the
+;                            screen.  If I choose to add it later, this function will need to
+;                            be modified to account for it.
+;----------------------------------------------------------------------------------------------
+
+TextScrollUp:
+			push		rbp								; create frame
+			mov			rbp,rsp
+			push		rbx								; save rbx, since we will modify
+			pushfq										; save the flags; no interrupting pls
+			cli											; no interrupts
+
+			xor			rdi,rdi							; clear rdi
+			mov			rbx,qword textBuf				; get the address of the buffer var
+			mov			edi,dword [rbx]					; now get the buffer address
+
+			xor			rcx,rcx							; clear rcx
+			mov			rbx,qword textNumCols			; get the address for the # cols var
+			mov			cl,byte [rbx]					; get the number of columns
+			mov			rdx,rcx							; we will want this again later
+			mov			rsi,rcx							; move it to the rsi reg as well
+			shl			rsi,1							; multiply by 2
+			add			rsi,rdi							; now get the source to cpy; 1 row down
+
+			xor			eax,eax							; clear eax
+			mov			rbx,qword textNumRows			; get the address of the # rows var
+			mov			al,byte [rbx]					; and get the number of rows
+
+			mul			al								; results in ax
+			mov			rcx,rax							; set the counter
+
+			cld											; make sure we increment
+			rep			movsw							; move the data
+
+			mov			rbx,qword textAttr				; get the address of the attr var
+			mov			ah,byte[rbx]					; and load its contents into ah
+			mov			al,0x20							; and the low byte is " "
+			mov			rcx,rdx							; restore the column count
+
+			rep			stosw							; clear the last line
+
+			popfq										; restore the IF
+			pop			rbx								; restore rbx
+			pop			rbp								; and caller's frame
+			ret
 
 ;==============================================================================================
 
