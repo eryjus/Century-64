@@ -7,9 +7,16 @@
 ;
 ; The functions provided in this file are:
 ;   void TextClear(void);
-;	void TextSetAttr(unsigned char attr);
+;   void TextPutChar(uint8 ch);
+;	void TextPutHexByte(uint8 b);
+;	void TextPutHexWord(uint16 w);
+;	void TextPutHexDWord(uint32 dw);
+;	void TextPutHexQWord(uint64 qw);
+;   void TextPutString(char *str);
+;	void TextSetAttr(uint8 attr);
 ;
 ; Internal functions:
+;	void TextOutputHex(register uint8 b);
 ;   void TextScrollUp(void);
 ;	void TextSetCursor(void);
 ;
@@ -26,13 +33,15 @@
 
 			section		.data
 
-textRow		db			0
-textCol		db			0
-textBuf		dd			0xb8000
-textAttr	db			0x0f
-textNumRows	db			25
-textNumCols	db			80
+textRow		db			0					; treat as unsigned
+textCol		db			0					; treat as unsigned
+textBuf		dd			0xb8000				; treat as unsigned
+textAttr	db			0x0f				; treat as unsigned
+textNumRows	db			25					; treat as unsigned
+textNumCols	db			80					; treat as unsigned
 
+textHex		db			'0123456789abcdef'	; a string of hexidecimal digits
+textHexPre	db			'0x',0				; the prefix for a hex number
 
 ;==============================================================================================
 ; The .text section is the 64-bit kernel proper
@@ -123,7 +132,7 @@ TextSetAttr:
 			mov			rbp,rsp
 			push		rbx								; save rbx, since we will modify
 
-			mov			rax,qword [rbp+16]					; get the new attr (8-byte aligned)
+			mov			rax,qword [rbp+16]				; get the new attr (8-byte aligned)
 			mov			rbx,qword textAttr				; get the address of the var
 			mov			[rbx],al						; and set the new value
 
@@ -131,6 +140,377 @@ TextSetAttr:
 			pop			rbp								; and caller's frame
 			ret
 
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; void TextPutChar(unsigned char ch) -- Put a character on the screen, handling newlines and
+;                                       carriage returns as well as scrolling when the cursor
+;                                       reaches the bottom of the screen.
+;----------------------------------------------------------------------------------------------
+
+			global		TextPutChar
+
+TextPutChar:
+			push		rbp								; create frame
+			mov			rbp,rsp
+			push		rbx								; save rbx, since we will modify
+			pushfq										; save the flags
+			cli											; no interrupts, please
+
+			mov			rax,qword [rbp+16]				; get the char to write (8-byte align)
+
+;----------------------------------------------------------------------------------------------
+; Do we have a \n or \r character?
+;----------------------------------------------------------------------------------------------
+
+			cmp			al,13							; do we have a carriage return?
+			je			.newline						; if so, we have to process a newline
+			cmp			al,10							; do we have a newline?
+			jne			.other							; if not, we have a real char
+
+;----------------------------------------------------------------------------------------------
+; we have to start a new line, whether by wrapping or by a char; set the current column to 0
+; and increment the current row by 1.
+;----------------------------------------------------------------------------------------------
+
+.newline:
+			mov			rbx,qword textCol				; get the address of the current col
+			mov			byte [rbx],0					; and set the value to 0
+
+			mov			rbx,qword textRow				; get the address of the current row
+			add			byte [rbx],1					; and add 1 to it
+			mov			dl,byte [rbx]					; and then save the result
+
+			mov			rbx,qword textNumRows			; get the address of the # rows
+			cmp			dl,byte [rbx]					; compare  row ?? #rows
+			jna			.out							; if not above (unsigned >), skip
+
+;----------------------------------------------------------------------------------------------
+; We know we need to scroll the screen
+;----------------------------------------------------------------------------------------------
+
+			call		TextScrollUp					; we need to scroll the screen
+
+;----------------------------------------------------------------------------------------------
+; Reset the cursor position
+;----------------------------------------------------------------------------------------------
+
+			mov			rbx,qword textCol				; get the address of the current col
+			mov			byte [rbx],0					; and set the value to 0
+
+			mov			rbx,qword textRow				; get the address of the current row
+			sub			byte [rbx],1					; and add 1 to it
+
+			jmp			.out							; we've done all we need to do
+
+;----------------------------------------------------------------------------------------------
+; Output a regular character
+;----------------------------------------------------------------------------------------------
+
+.other:
+			mov			rbx,qword textAttr				; get the address of the var
+			mov			ah,[rbx]						; get the ttribute as well
+
+			mov			rdx,rax							; save the rax register
+			xor			rax,rax							; clear rax
+
+			mov			rbx,qword textRow				; get the address of the text row
+			mov			al,byte [rbx]					; and get its value
+
+			mov			rbx,qword textNumCols			; get the address of the # cols
+			mov			ah,byte [rbx]					; and get its value
+
+			mul			ah								; the result is in ax
+
+			mov			rbx,qword textCol				; get the address of the text col
+			mov			cl,byte [rbx]					; and get its value
+			xor			ch,ch							; zero out the upper bits
+
+			add			ax,cx							; add the 2 numbers
+			shl			rax,1							; multiply by 2 (attr/char paris)
+
+			xor			rdi,rdi							; clear rdi
+			mov			rbx,qword textBuf				; get the address of the screen buffer
+			mov			edi,dword [rbx]					; and get its address
+
+			add			rdi,rax							; add the offset to the buffer addr
+			mov			word [rdi],dx					; and put the character on the screen
+
+;----------------------------------------------------------------------------------------------
+; move the cursor to the next position on the screen
+;----------------------------------------------------------------------------------------------
+
+			xor			rax,rax							; clear rax
+			mov			rbx,qword textNumCols			; get the address of the # cols
+			mov			al,byte [rbx]					; and get its value
+
+			mov			rbx,qword textCol				; get the address of the current col
+			add			byte [rbx],1					; and add 1 to it
+
+			cmp			byte [rbx],al					; compare: curcol ?? maxcols
+			jae			.newline						; if curcol >= maxcols, wrap line
+
+.out:
+			call		TextSetCursor
+
+			popfq										; restore IF
+			pop			rbx								; restore rbx
+			pop			rbp								; and caller's frame
+			ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; void TextPutHexByte(uint8 b) -- print the value of a hex byte on the screen
+;----------------------------------------------------------------------------------------------
+
+			global		TextPutHexByte
+
+TextPutHexByte:
+			push		rbp								; create frame
+			mov			rbp,rsp
+			push		rbx								; save rbx, since we will modify
+
+			mov			rbx,qword textHexPre			; get the address of the prefix
+			push		rbx
+			call		TextPutString					; and write it on the screen
+			add			rsp,8							; clean up the stack
+
+			mov			rax,[rbp+16]					; get the byte to print (8-byte filled)
+			call		TextOutputHex					; print the byte
+
+			pop			rbx								; restore rbx
+			pop			rbp								; and caller's frame
+			ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; void TextPutHexWord(uint16 w) -- print the value of a hex word on the screen
+;----------------------------------------------------------------------------------------------
+
+			global		TextPutHexWord
+
+TextPutHexWord:
+			push		rbp								; create frame
+			mov			rbp,rsp
+			push		rbx								; save rbx, since we will modify
+
+			mov			rbx,qword textHexPre			; get the address of the prefix
+			push		rbx
+			call		TextPutString					; and write it on the screen
+			add			rsp,8							; clean up the stack
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			shr			rax,8							; get the upper byte from the word
+			call		TextOutputHex					; print the byte
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			and			rax,qword 0xff					; get the lower byte from the word
+			call		TextOutputHex					; print the byte
+
+			pop			rbx								; restore rbx
+			pop			rbp								; and caller's frame
+			ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; void TextPutHexDWord(uint32 dw) -- print the value of a hex dword on the screen
+;----------------------------------------------------------------------------------------------
+
+			global		TextPutHexDWord
+
+TextPutHexDWord:
+			push		rbp								; create frame
+			mov			rbp,rsp
+			push		rbx								; save rbx, since we will modify
+
+			mov			rbx,qword textHexPre			; get the address of the prefix
+			push		rbx
+			call		TextPutString					; and write it on the screen
+			add			rsp,8							; clean up the stack
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			shr			rax,24							; get the upper byte from the dword
+			and			rax,qword 0xff					; get the lower byte from the dword
+			call		TextOutputHex					; print the byte
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			shr			rax,16							; get the 2nd byte from the dword
+			and			rax,qword 0xff					; get the lower byte from the dword
+			call		TextOutputHex					; print the byte
+
+			push		qword '_'						; push it on the stack
+			call		TextPutChar						; and display it
+			add			rsp,8							; clean up the stack
+
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			shr			rax,8							; get the 3rd byte from the dword
+			and			rax,qword 0xff					; get the lower byte from the dword
+			call		TextOutputHex					; print the byte
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			and			rax,qword 0xff					; get the lower byte from the word
+			call		TextOutputHex					; print the byte
+
+			pop			rbx								; restore rbx
+			pop			rbp								; and caller's frame
+			ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; void TextPutHexQWord(uint32 qw) -- print the value of a hex qword on the screen
+;----------------------------------------------------------------------------------------------
+
+			global		TextPutHexQWord
+
+TextPutHexQWord:
+			push		rbp								; create frame
+			mov			rbp,rsp
+			push		rbx								; save rbx, since we will modify
+
+			mov			rbx,qword textHexPre			; get the address of the prefix
+			push		rbx
+			call		TextPutString					; and write it on the screen
+			add			rsp,8							; clean up the stack
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			shr			rax,56							; get the upper byte from the qword
+			and			rax,qword 0xff					; get the lower byte from the qword
+			call		TextOutputHex					; print the byte
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			shr			rax,48							; get the 2nd byte from the qword
+			and			rax,qword 0xff					; get the lower byte from the qword
+			call		TextOutputHex					; print the byte
+
+			push		qword '_'						; push it on the stack
+			call		TextPutChar						; and display it
+			add			rsp,8							; clean up the stack
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			shr			rax,40							; get the 3rd byte from the qword
+			and			rax,qword 0xff					; get the lower byte from the qword
+			call		TextOutputHex					; print the byte
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			shr			rax,32							; get the 4th byte from the qword
+			and			rax,qword 0xff					; get the lower byte from the qword
+			call		TextOutputHex					; print the byte
+
+			push		qword '_'						; push it on the stack
+			call		TextPutChar						; and display it
+			add			rsp,8							; clean up the stack
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			shr			rax,24							; get the 5th byte from the qword
+			and			rax,qword 0xff					; get the lower byte from the qword
+			call		TextOutputHex					; print the byte
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			shr			rax,16							; get the 6th byte from the qword
+			and			rax,qword 0xff					; get the lower byte from the qword
+			call		TextOutputHex					; print the byte
+
+			push		qword '_'						; push it on the stack
+			call		TextPutChar						; and display it
+			add			rsp,8							; clean up the stack
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			shr			rax,8							; get the 7th byte from the dword
+			and			rax,qword 0xff					; get the lower byte from the dword
+			call		TextOutputHex					; print the byte
+
+			mov			rax,[rbp+16]					; get the word to print (8-byte filled)
+			and			rax,qword 0xff					; get the lower byte from the word
+			call		TextOutputHex					; print the byte
+
+			pop			rbx								; restore rbx
+			pop			rbp								; and caller's frame
+			ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; void TextPutString(char *str) -- put a null-terminated string of characters onto the screen
+;----------------------------------------------------------------------------------------------
+
+			global		TextPutString
+
+TextPutString:
+			push		rbp								; create frame
+			mov			rbp,rsp
+			push		rbx								; save rbx, since we will modify
+			sub			rsp,8							; make room on the stack for a parm
+
+			mov			rsi,[rbp+16]					; get the address of the string
+.loop:
+			xor			rax,rax							; clear the rax reg
+			mov			al,byte[rsi]					; get the next byte to write
+			cmp			al,0							; are we at null?
+			je			.out							; if so, exit
+
+			mov			[rsp],rax						; put the 8-byte aligned parameter
+			call		TextPutChar						; put the character on the screen
+			inc			rsi								; move to the next character
+			jmp			.loop
+
+.out:
+			add			rsp,8							; remove the working parameter
+			pop			rbx								; restore rbx
+			pop			rbp								; and caller's frame
+			ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; void TextOutputHex(register uint8 b) -- This is the working function for outputting hex
+;                                         numbers on the screen.  Note that the byte with
+;                                         which to work is passed in through rax (the lowest
+;                                         8 bits).  The function will only output 2 characters
+;                                         on the screen.  All other formatting is handled
+;                                         outside this function.
+;----------------------------------------------------------------------------------------------
+
+TextOutputHex:
+			push		rbp								; create frame
+			mov			rbp,rsp
+			push		rbx								; save rbx, since we will modify
+
+			mov			rsi,qword textHex				; get the address of the char array
+			xor			rdx,rdx							; clear out rdx
+			mov			dl,al							; get the byte
+			shr			dl,4							; we want the upper 4 bits of the byte
+
+			xor			rcx,rcx							; clear rcx
+			add			rsi,rdx							; move to the offset
+			mov			cl,byte [rsi]					; get the hex digit
+
+			push		rax								; we need to keep this value
+			push		rcx								; push it on the stack
+			call		TextPutChar						; and display it
+			add			rsp,8							; clean up the stack
+			pop			rax								; now restore this value
+
+			mov			rsi,qword textHex				; get the address of the char array
+			xor			rdx,rdx							; clear out rdx
+			and			rax,qword 0x0f					; we want the lower 4 bits of the byte
+
+			xor			rcx,rcx							; clear rcx
+			add			rsi,rax							; move to the offset
+			mov			cl,byte [rsi]					; get the hex digit
+
+			push		rcx								; push it on the stack
+			call		TextPutChar						; and display it
+			add			rsp,8							; clean up the stack
+
+			pop			rbx								; restore rbx
+			pop			rbp								; and caller's frame
+			ret
 
 ;==============================================================================================
 

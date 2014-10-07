@@ -428,6 +428,10 @@ gdt64enable:
 
 VIRT_BASE	equ			0xffffffff80000000
 
+HelloString:
+			db			'Welcome to Century-64',13
+			db			"  (it's gonna take a century to finish!)",0
+
 			align		8
 
 ;==============================================================================================
@@ -438,6 +442,12 @@ VIRT_BASE	equ			0xffffffff80000000
 			bits		64
 
 			extern		TextClear
+			extern		TextPutHexByte
+			extern		TextPutHexWord
+			extern		TextPutHexDWord
+			extern		TextPutHexQWord
+			extern		TextPutChar
+			extern		TextPutString
 
 StartHigherHalf:
 			mov			ebx,0xb8000
@@ -497,6 +507,15 @@ StartHigherHalf:
 ;----------------------------------------------------------------------------------------------
 
 			call		TextClear
+
+			mov			rbx,qword HelloString
+			push		rbx
+			call		TextPutString
+			add			rsp,8
+
+			push		qword 0x4f
+			call		TextPutHexQWord
+			add			rsp,8
 
 .loop:
 			cli
