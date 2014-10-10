@@ -42,6 +42,12 @@
 ;
 ;==============================================================================================
 
+%define		__LOADER_S__
+%include	'private.inc'
+
+			global		mbEAX
+			global		mbEBX
+
 ;----------------------------------------------------------------------------------------------
 ; Setup to some constants that will be used in our kernel
 ;----------------------------------------------------------------------------------------------
@@ -340,8 +346,6 @@ EntryPoint:
 ; Enable paging
 ;----------------------------------------------------------------------------------------------
 
-			extern		PML4Table
-
 			mov			ecx,PML4Table		; load cr3 with out PML4 table
 			mov			cr3,ecx
 
@@ -430,9 +434,12 @@ VIRT_BASE	equ			0xffffffff80000000
 
 HelloString:
 			db			'Welcome to Century-64',13
-			db			"  (it's gonna take a century to finish!)",0
-
-			align		8
+			db			"  (it's gonna take a century to finish!)",13,13
+			db			"---------- __o       __o       __o       __o",13
+			db			"-------- _`\<,_    _`\<,_    _`\<,_    _`\<,_",13
+			db			"------- (*)/ (*)  (*)/ (*)  (*)/ (*)  (*)/ (*)",13
+			db			"~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",13
+			db			"   ... speed is good!",13,13,0
 
 ;==============================================================================================
 ; The .text section is the 64-bit kernel proper
@@ -440,14 +447,6 @@ HelloString:
 
 			section		.text
 			bits		64
-
-			extern		TextClear
-			extern		TextPutHexByte
-			extern		TextPutHexWord
-			extern		TextPutHexDWord
-			extern		TextPutHexQWord
-			extern		TextPutChar
-			extern		TextPutString
 
 StartHigherHalf:
 			mov			ebx,0xb8000
@@ -513,9 +512,7 @@ StartHigherHalf:
 			call		TextPutString
 			add			rsp,8
 
-			push		qword 0x4f
-			call		TextPutHexQWord
-			add			rsp,8
+			call		CheckMB
 
 .loop:
 			cli

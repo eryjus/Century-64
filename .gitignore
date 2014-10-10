@@ -1,6 +1,6 @@
 # Code::Blocks project files
 *.depend
-*.layout
+*.layout*
 .directory
 *.cbp
 

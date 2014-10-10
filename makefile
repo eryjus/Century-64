@@ -23,7 +23,7 @@ TGT-CDROM=$(TGT-DIR)/$(TGT-ISO)
 
 LINK-SCRIPT=linker.ld
 
-ASM=nasm -felf64
+ASM=nasm -felf64 -Isrc/ -Iinclude/
 LD=x86_64-elf-gcc -ffreestanding -O2 -nostdlib -z max-page-size=0x1000
 LD-SCRIPT=-T $(LINK-SCRIPT)
 LD-LIBS=-lgcc
@@ -55,7 +55,7 @@ $(TGT-FILE): $(OBJ) $(LINK-SCRIPT) makefile
 	mkdir -p bin
 	$(LD) $(LD-SCRIPT) -o $@ $(OBJ) $(LD-LIBS)
 
-obj/%.o: src/%.s makefile
+obj/%.o: src/%.s src/*.inc makefile
 	echo Assembling $<...
 	mkdir -p obj
 	$(ASM) $< -o $@
