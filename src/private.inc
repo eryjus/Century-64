@@ -12,6 +12,14 @@
 
 
 ;----------------------------------------------------------------------------------------------
+; -- the following symbols are added by the linker
+;----------------------------------------------------------------------------------------------
+
+			extern		bootStart
+			extern		bootEnd
+			extern		bssEnd
+
+;----------------------------------------------------------------------------------------------
 ; -- the following symbols are found in loader.s
 ;----------------------------------------------------------------------------------------------
 
@@ -41,6 +49,7 @@
 			extern		TextPutChar
 			extern		TextPutString
 			extern		TextSetAttr
+			extern		TextSetBlockCursor
 %endif
 
 ;----------------------------------------------------------------------------------------------
@@ -49,4 +58,14 @@
 
 %ifndef	__MBCHECK_S__
 			extern		CheckMB
+%endif
+
+;----------------------------------------------------------------------------------------------
+; -- the following symbols are found in mbcheck.s
+;----------------------------------------------------------------------------------------------
+
+%ifndef	__PHYSMM_S__
+			extern		PMMInit
+			extern		PMMMarkBlockFree
+			extern		PMMMarkBlockUsed
 %endif

@@ -39,6 +39,14 @@
 ;                            and ahd the following suggestion om memory layout:
 ;                            http://forum.osdev.org/viewtopic.php?f=1&t=28573#p240979.
 ;                            In short, I'm taking his advice and redoing the startup code.
+; 2014/10/12  #169     ADCL  For me, the ABI standard is causing me issues. For whatever reason,
+;                            I am having trouble keeping track of "registers I want to save as
+;                            the caller" rather than "saving all registers I will modify as the
+;                            callee". I will adopt the latter standard so that debugging will
+;                            be easier to manage, with the exception of rax.  DF in rFLAGS will
+;                            be maintained as clear.
+;                            Established the final connection to the Physical Memory Manager
+;                            Initialization.
 ;
 ;==============================================================================================
 
@@ -208,6 +216,7 @@ EntryPoint:
 ;----------------------------------------------------------------------------------------------
 
 			cli								; no interrupts, please
+			cld								; make sure we increment -- per ABI
 
 			mov			[mbEAX],eax			; we need to save eax as it has data we want
 			mov			[mbEBX],ebx			; we also need to save ebx as it also has data
@@ -505,27 +514,41 @@ StartHigherHalf:
 ; starts on page boundaries.  However, for now, the order of things is not likely to change.
 ;----------------------------------------------------------------------------------------------
 
-			call		TextClear
+				call		TextSetBlockCursor
+				call		TextClear
 
-			mov			rbx,qword HelloString
-			push		rbx
-			call		TextPutString
-			add			rsp,8
+				mov			rbx,qword HelloString
+				push		rbx
+				call		TextPutString
+				mov			qword [rsp],13
+				call		TextPutChar
+				add			rsp,8
 
-			call		CheckMB
+				call		PMMInit					; initialize the physical pages to used
+				call		CheckMB					; get MB info and map free memory
+
+				mov			rax,qword bssEnd		; get the address of the last byte
+				mov			rbx,qword bootStart		; get the address of the first address
+				sub			rax,rbx					; calc the size of the block
+				push		rax						; push the size on the stack
+				push		rbx						; and push the start on the stack
+
+				call		PMMMarkBlockUsed		; map kernel memory in Physical pages
+
+				add			rsp,16					; clean up stack
 
 .loop:
-			cli
-			hlt
-			jmp			.loop
+				cli
+				hlt
+				jmp			.loop
 
 ;==============================================================================================
 ; The .bss section so far contains the kernel stack
 ;==============================================================================================
 
-			section		.bss
-			align		0x1000
+				section		.bss
+				align		0x1000
 
-stack:		resb		STACKSIZE
+stack:			resb		STACKSIZE
 
 ;==============================================================================================

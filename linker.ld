@@ -35,6 +35,7 @@ VIRT_BASE = 0xffffffff80000000;
 SECTIONS
 {
 	. = 0x100000;
+	bootStart = .;
 
 	.boot :
 	{
