@@ -31,6 +31,9 @@
 ;                            be easier to manage, with the exception of rax.  DF in rFLAGS will
 ;                            be maintained as clear.
 ;                            At the same time reformat for spacing
+; 2014/10/13  #172     ADCL  OK, found that the textNumRows and textNumCols variables were
+;                            misnamed and misused.  I am renaming them to the way they will be
+;                            used, which is textMaxRow and textMaxCol (the upper limit).
 ;
 ;==============================================================================================
 
@@ -45,8 +48,8 @@ textRow			db			0							; treat as unsigned
 textCol			db			0							; treat as unsigned
 textBuf			dd			0xb8000						; treat as unsigned
 textAttr		db			0x0f						; treat as unsigned
-textNumRows		db			24							; treat as unsigned
-textNumCols		db			80							; treat as unsigned
+textMaxRow		db			24							; treat as unsigned
+textMaxCol		db			79							; treat as unsigned
 
 textHex			db			'0123456789abcdef'			; a string of hexidecimal digits
 textHexPre		db			'0x',0						; the prefix for a hex number
@@ -88,10 +91,10 @@ TextClear:
 				xor			rdi,rdi						; clear rdi for safety
 				mov			edi,dword [rbx]				; and load its contents into rdi
 
-				mov			rbx,qword textNumRows		; get the address of the #rows var
+				mov			rbx,qword textMaxRow		; get the address of the max rows #
 				mov			al,byte [rbx]				; and load its contents into al
 
-				mov			rbx,qword textNumCols		; get the address of the #cols var
+				mov			rbx,qword textMaxCol		; get the address of the max col #
 				mov			ah,byte [rbx]				; and load its contents into ah
 
 				mul			ah							; mul rows by cols -- result in ax
@@ -200,9 +203,9 @@ TextPutChar:
 				add			byte [rbx],1				; and add 1 to it
 				mov			dl,byte [rbx]				; and then save the result
 
-				mov			rbx,qword textNumRows		; get the address of the # rows
+				mov			rbx,qword textMaxRow		; get the address of the max row #
 				cmp			dl,byte [rbx]				; compare  row ?? #rows
-				jb			.out						; if not above (unsigned >), skip
+				jbe			.out						; if not above (unsigned >), skip
 
 ;----------------------------------------------------------------------------------------------
 ; We know we need to scroll the screen
@@ -217,7 +220,7 @@ TextPutChar:
 				mov			rbx,qword textCol			; get the address of the current col
 				mov			byte [rbx],0				; and set the value to 0
 
-				mov			rbx,qword textNumRows		; get the address of the # rows
+				mov			rbx,qword textMaxRow		; get the address of the max row #
 				mov			dl,byte [rbx]				; get total # rows
 
 				mov			rbx,qword textRow			; get the address of the current row
@@ -239,8 +242,9 @@ TextPutChar:
 				mov			rbx,qword textRow			; get the address of the text row
 				mov			al,byte [rbx]				; and get its value
 
-				mov			rbx,qword textNumCols		; get the address of the # cols
+				mov			rbx,qword textMaxCol		; get the address of the max col #
 				mov			ah,byte [rbx]				; and get its value
+				inc			ah							; adjust it for # cols
 
 				mul			ah							; the result is in ax
 
@@ -263,14 +267,14 @@ TextPutChar:
 ;----------------------------------------------------------------------------------------------
 
 				xor			rax,rax						; clear rax
-				mov			rbx,qword textNumCols		; get the address of the # cols
+				mov			rbx,qword textMaxCol		; get the address of the max col #
 				mov			al,byte [rbx]				; and get its value
 
 				mov			rbx,qword textCol			; get the address of the current col
 				add			byte [rbx],1				; and add 1 to it
 
 				cmp			byte [rbx],al				; compare: curcol ?? maxcols
-				jae			.newline					; if curcol >= maxcols, wrap line
+				ja			.newline					; if curcol >= maxcols, wrap line
 
 .out:
 				call		TextSetCursor
@@ -569,7 +573,7 @@ TextScrollUp:
 				mov			edi,dword [rbx]				; now get the buffer address
 
 				xor			rcx,rcx						; clear rcx
-				mov			rbx,qword textNumCols		; get the address for the # cols var
+				mov			rbx,qword textMaxCol		; get the address for the max col #
 				mov			cl,byte [rbx]				; get the number of columns
 				mov			ah,cl						; save this value for later
 				shl			rcx,1						; multiply by 2 to get words
@@ -577,7 +581,7 @@ TextScrollUp:
 				mov			rsi,rcx						; move it to the rsi reg as well
 				add			rsi,rdi						; now get the source to cpy; 1 row down
 
-				mov			rbx,qword textNumRows		; get the address of the # rows var
+				mov			rbx,qword textMaxRow		; get the address of the max row #
 				mov			al,byte [rbx]				; and get the number of rows
 
 				mul			ah							; mult by ah, results in ax
@@ -626,8 +630,9 @@ TextSetCursor:
 				mov			rbx,qword textRow			; get the address of the textRow var
 				mov			al,byte [rbx]				; and load the value into al
 
-				mov			rbx,qword textNumCols		; get address of the textNumCols var
+				mov			rbx,qword textMaxCol		; get address of the max col #
 				mov			ah,byte [rbx]				; and load the value into ah
+				inc			ah							; reset this to be the # cols
 
 				mul			ah							; multiply; result in ax
 

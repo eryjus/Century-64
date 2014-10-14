@@ -483,21 +483,22 @@ StartHigherHalf:
 			mov			word [ebx+(7*2)],0x0f<<8|'H'	; put a "H" on the screen
 
 ;----------------------------------------------------------------------------------------------
-; At this point, the memory layout looks like this:
+; At this point, a 2M memory layout looks like this:
 ;
 ; #	Physical Addr	Size		Virtual Addr 1			Virtual Addr 2			Usage
 ; -	-------------	--------	------------------		-------------------		-----------
-; 1	0x00000000 		1MB			0x0000000000000000		0xffffffff80000000		Open
+; 1	0x00000000 		1MB			0x0000000000000000		0xffffffff80000000		Open (most)
 ; 2	0x00100000		4KB			0x0000000000100000		0xffffffff80100000		MBHdr&Code
-; 3	0x00101000		16KB		0x0000000000101000		0xffffffff80101000		Boot Stack
-; 4	0x00105000		12KB		0x0000000000105000		0xffffffff80105000		Open
+; 3	0x00101000		22KB		0x0000000000101000		0xffffffff80101000		Entry&Stack
+; 4	0x00105000		1KB			0x0000000000107000		0xffffffff80107000		Open
 ; 5	0x00108000		28KB		0x0000000000108000		0xffffffff80108000		Paging Tbls
 ; 6	0x0010f000		4K			0x000000000010f000		0xffffffff8010f000		64-bit code
 ; 7	0x00110000		16K			0x0000000000110000		0xffffffff80110000		kernel stack
-; 8 0x00114000		up to 2M	0x0000000000114000		0xffffffff80114000		open
+; 8 0x00115000		128K		0x0000000000115000		0xffffffff80115000		PMM Bitmap
+; 9 0x00135000		to 2M tot	0x0000000000135000		0xffffffff80135000		open
 ;
 ; So, with the above information we want to do the following:
-; 1, 4, & 8 -- These memory blocks will become part of the free memory pool; we will drop both
+; 1, 4, & 9 -- These memory blocks will become part of the free memory pool; we will drop both
 ;              high and low memory mappings
 ; 2 -- Keep this memory allocated as it holds out GDT (may want to relocate in the future); we
 ;      will drop the high memory mapping
@@ -508,33 +509,32 @@ StartHigherHalf:
 ; 6 -- The kernel proper; we will drop the low memory mapping
 ; 7 -- The bss (a data segment will be added in here somewhere, which we want to keep); we will
 ;      drop the low memory mapping.
+; 8 -- This is the physical memory map for 4G.  It will stay.
 ;
 ; **** NOTE ****
 ; This memory map will change as the code grows.  Care has been taken to align the section
 ; starts on page boundaries.  However, for now, the order of things is not likely to change.
 ;----------------------------------------------------------------------------------------------
 
-				call		TextSetBlockCursor
-				call		TextClear
+				call		TextSetBlockCursor		; create a block cursor
+				call		TextClear				; clear the screen
 
-				mov			rbx,qword HelloString
-				push		rbx
-				call		TextPutString
-				mov			qword [rsp],13
-				call		TextPutChar
-				add			rsp,8
+				mov			rbx,qword HelloString	; get the hello string to print
+				push		rbx						; and push it on the stack
+				call		TextPutString			; put it on the screen
+				add			rsp,8					; clean up the stack
 
 				call		PMMInit					; initialize the physical pages to used
 				call		CheckMB					; get MB info and map free memory
 
 				mov			rax,qword bssEnd		; get the address of the last byte
 				mov			rbx,qword bootStart		; get the address of the first address
+				sub			rax,qword VIRT_BASE		; adjust to the physical address
 				sub			rax,rbx					; calc the size of the block
+
 				push		rax						; push the size on the stack
 				push		rbx						; and push the start on the stack
-
 				call		PMMMarkBlockUsed		; map kernel memory in Physical pages
-
 				add			rsp,16					; clean up stack
 
 .loop:

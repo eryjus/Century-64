@@ -39,6 +39,11 @@
 ;	void PMMInit(void);
 ;	void PMMMarkBlockFree(qword strart, qword length);
 ;	void PMMMarkBlockUsed(qword strart, qword length);
+;	qword PMMAllocLowerMem(void);
+;	qword PMMAllocUpperMem(void);
+;	qword PMMAlloc32bitMem(void);
+;	qword PMMAllocMem(void);
+;	void PMMFreeMem(qword frame);
 ;
 ; The following functions are internal functions:
 ;	void PMMSetBitFree(qword addr);
@@ -62,6 +67,17 @@
 
 
 ;==============================================================================================
+; the .data segment has the data members that will be used for allocations
+;==============================================================================================
+
+				section		.data
+				align		8
+
+pmmLoIndex		dq			0
+pmmHiIndex		dq			PMMLOQWORDS
+pmm32Index		dq			PMMLOQWORDS
+
+;==============================================================================================
 ; the .bss section here contains the memory reservation for the page allocation bitmap
 ;==============================================================================================
 
@@ -69,6 +85,8 @@
 				align		0x1000
 
 PMMQWORDS		equ			16384					; that's 128K
+PMMLOQWORDS		equ			4						; that's up to 1M for allocating low-memory
+PMM32BIT		equ			(1024*1024)/64			; that's 4GB memory
 
 PMMBitMap: 		resq		PMMQWORDS
 
@@ -110,9 +128,13 @@ PMMInit:
 ;==============================================================================================
 
 ;----------------------------------------------------------------------------------------------
-; void PMMSetBitFree(uint64 addr) -- Mark a page as free by setting its flag to be a '1'
+; void PMMSetBitFree(qword addr) -- Mark a page as free by setting its flag to be a '1'
+; void PMMFreeMem(qword frame) -- Free a memory frame back to the pool.  These functions do
+;                                 the same thing (the only possible difference might be
+;                                 clearing the page before releasing the frame.
 ;----------------------------------------------------------------------------------------------
 
+PMMFreeMem:
 PMMSetBitFree:
 				push		rbp					; create a new stack frame
 				mov			rbp,rsp
@@ -154,7 +176,7 @@ PMMSetBitFree:
 ;==============================================================================================
 
 ;----------------------------------------------------------------------------------------------
-; void PMMSetBitUsed(uint64 addr) -- Mark a page as used by setting its flag to be a '0'
+; void PMMSetBitUsed(qword addr) -- Mark a page as used by setting its flag to be a '0'
 ;----------------------------------------------------------------------------------------------
 
 PMMSetBitUsed:
@@ -215,7 +237,6 @@ PMMMarkBlockFree:
 				push		rbx					; assume we will modify rbx
 				push		rcx					; assume we will modify rbx
 				push		rdi					; assume we will modify rbx
-				push		r15					; assume we will modify rbx
 
 				mov			rax,qword [rbp+16]	; get the start parm
 				mov			rdi,rax				; and store it in rdi
@@ -232,8 +253,9 @@ PMMMarkBlockFree:
 				add			rdi,qword 0x0000000000001000	; and move to the next page
 
 .adjusted:
-				mov			r15,rdi				; save this value
+				push		rdi					; push this value for the function
 				call		PMMSetBitFree		; call the function
+				add			rsp,8				; clean up the stack
 
 				add			rdi,0x1000			; move to the next page
 				sub			rcx,1				; next iteration
@@ -243,7 +265,6 @@ PMMMarkBlockFree:
 				jmp			.adjusted
 
 .out:
-				pop			r15					; restore the fields
 				pop			rdi					; restore the fields
 				pop			rcx					; restore the fields
 				pop			rbx					; restore the fields
@@ -251,6 +272,15 @@ PMMMarkBlockFree:
 				ret
 
 ;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; void PMMMarkBlockUsed(qword strart, qword length) -- Mark a block of pages used, adjusting
+;                                                      properly for the start to break on page
+;                                                      boundaries, and adjusting the length
+;                                                      to break on boundaries as well.  If a
+;                                                      page is partially free and partially
+;                                                      used, then consider the whole page used.
+;----------------------------------------------------------------------------------------------
 
 				global		PMMMarkBlockUsed
 
@@ -260,7 +290,6 @@ PMMMarkBlockUsed:
 				push		rbx					; assume we will modify rbx
 				push		rcx					; assume we will modify rbx
 				push		rdi					; assume we will modify rbx
-				push		r15					; assume we will modify rbx
 
 				mov			rax,qword [rbp+16]	; get the start parm
 				mov			rdi,rax				; and store it in rdi
@@ -269,7 +298,7 @@ PMMMarkBlockUsed:
 				shr			rcx,12				; shift this down to be a count -- will
 												; truncate a partial page at the end
 
-				test		rcx,qword 0x0000000000000fff ; check for partial page at start
+				test		rcx,qword 0x0000000000000fff ; check for partial page at end
 				jz			.adjusted			; skip the adjustments
 
 				and			rcx,qword 0xfffffffffffff000	; Align to page
@@ -278,8 +307,9 @@ PMMMarkBlockUsed:
 .adjusted:
 				and			rdi,qword 0xfffffffffffff000	; truncate to a page boundary
 
-				mov			r15,rdi				; save this value
+				push		rdi					; save this value
 				call		PMMSetBitUsed		; call the function
+				add			rsp,8				; clean up the stack
 
 				add			rdi,0x1000			; move to the next page
 				sub			rcx,1				; next iteration
@@ -289,7 +319,6 @@ PMMMarkBlockUsed:
 				jmp			.adjusted
 
 .out:
-				pop			r15					; restore the fields
 				pop			rdi					; restore the fields
 				pop			rcx					; restore the fields
 				pop			rbx					; restore the fields
@@ -298,7 +327,296 @@ PMMMarkBlockUsed:
 
 ;==============================================================================================
 
-				section		.data
+;----------------------------------------------------------------------------------------------
+; qword PMMAllocLowerMem(void) -- Allocate a frame in the lower memory section (up to 1MB).
+;                                 If the allocation fails, return -1 for the frame
+;----------------------------------------------------------------------------------------------
 
-logging			db			'    Logging page ',0
-asFree			db			' as free.',13,0
+				global		PMMAllocLowerMem
+
+PMMAllocLowerMem:
+				push		rbp					; create a new stack frame
+				mov			rbp,rsp
+				push		rbx					; we will modify rbx
+				push		rcx					; we will modify rcx
+				push		rdx					; we will modify rdx
+				push		rsi					; save rsi
+				push		r13					; save r13
+				push		r14					; save r14
+				push		r15					; we will modify r15
+				pushfq
+				cli								; please don't interrupt me!
+
+				mov			rbx,qword pmmLoIndex; get the address of the var
+				mov			r13,rbx				; save the address of the var
+				mov			r15,[rbx]			; get the starting value
+				mov			r14,r15				; we also need a working value
+
+				mov			rbx,qword PMMBitMap	; get the bitmap address
+
+.loop:
+				mov			rax,r14				; get the working value
+				shl			rax,8				; convert the value to qwords
+
+				mov			rcx,[rbx+rax]		; get the bitmap qword
+				cmp			rcx,0				; is the memory fully booked?
+				jne			AllocCommonEnd.found; if some space, go get it
+
+				inc			r14					; continue our search
+				cmp			r14,qword PMMLOQWORDS	; are we at the end of the list?
+				jb			.chkDone			; if not at last byte, go chk is checked all
+
+				xor			r14,r14				; start over at byte 0
+
+.chkDone:
+				cmp			r14,r15				; check if we have fully looped
+				jne			.loop				; if not, go check again
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; qword PMMAllocUpperMem(void) -- Allocate a frame in the upper memory section (> 1MB).
+;                                 If the allocation fails, return -1 for the frame
+;----------------------------------------------------------------------------------------------
+
+				global		PMMAllocUpperMem
+
+PMMAllocUpperMem:
+				push		rbp					; create a new stack frame
+				mov			rbp,rsp
+				push		rbx					; we will modify rbx
+				push		rcx					; we will modify rcx
+				push		rdx					; we will modify rdx
+				push		rsi					; save rsi
+				push		r13					; save r13
+				push		r14					; save r14
+				push		r15					; we will modify r15
+				pushfq
+				cli								; please don't interrupt me!
+
+				mov			rbx,qword pmmHiIndex; get the address of the var
+				mov			r13,rbx				; save the address of the var
+				mov			r15,[rbx]			; get the starting value
+				mov			r14,r15				; we also need a working value
+
+				mov			rbx,qword PMMBitMap	; get the bitmap address
+
+.loop:
+				mov			rax,r14				; get the working value
+				shl			rax,8				; convert the value to qwords
+
+				mov			rcx,[rbx+rax]		; get the bitmap qword
+				cmp			rcx,0				; is the memory fully booked?
+				jne			AllocCommonEnd.found; if some space, go get it
+
+				inc			r14					; continue our search
+				cmp			r14,qword PMMQWORDS	; are we at the end of the list?
+				jb			.chkDone			; if not at last byte, go chk is checked all
+
+				mov			r14,qword PMMLOQWORDS	; start over at 1MB
+
+.chkDone:
+				cmp			r14,r15				; check if we have fully looped
+				jne			.loop				; if not, go check again
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; qword PMMAlloc32bitMem(void) -- Allocate a frame in 32-bit accessible (<4GB) memory
+;----------------------------------------------------------------------------------------------
+
+				global		PMMAllocUpperMem
+
+PMMAlloc32bitMem:
+				push		rbp					; create a new stack frame
+				mov			rbp,rsp
+				push		rbx					; we will modify rbx
+				push		rcx					; we will modify rcx
+				push		rdx					; we will modify rdx
+				push		rsi					; save rsi
+				push		r13					; save r13
+				push		r14					; save r14
+				push		r15					; we will modify r15
+				pushfq
+				cli								; please don't interrupt me!
+
+				mov			rbx,qword pmm32Index; get the address of the var
+				mov			r13,rbx				; save the address of the var
+				mov			r15,[rbx]			; get the starting value
+				mov			r14,r15				; we also need a working value
+
+				mov			rbx,qword PMMBitMap	; get the bitmap address
+
+.loop:
+				mov			rax,r14				; get the working value
+				shl			rax,8				; convert the value to qwords
+
+				mov			rcx,[rbx+rax]		; get the bitmap qword
+				cmp			rcx,0				; is the memory fully booked?
+				jne			AllocCommonEnd.found; if some space, go get it
+
+				inc			r14					; continue our search
+				cmp			r14,qword PMM32BIT	; are we at the end of the list?
+				jb			.chkDone			; if not at last byte, go chk is checked all
+
+				mov			r14,qword PMMLOQWORDS	; start over at 1MB
+
+.chkDone:
+				cmp			r14,r15				; check if we have fully looped
+				jne			.loop				; if not, go check again
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; AllocCommonEnd -- This is a label for a function in process.  It will be a common ending to
+;                   both the PMMAllocUpperMem and PMMAllocLowerMem functions to reduce code
+;                   duplicaiton.
+;----------------------------------------------------------------------------------------------
+
+AllocCommonEnd:
+.noneFound:											; if we reach this point, no mem is available
+				mov			rax,qword 0xffffffffffffffff	; set the return to -1
+				jmp			AllocCommonEnd.out
+
+;----------------------------------------------------------------------------------------------
+; let's make sure we know what we know:
+;  * rbx holds the address of the PMMBitMap
+;  * rcx holds the bitmap we found to have a free frame
+;  * r14 holds the qword offset for the bitmap; this becomes the bits 63-18 of the frame
+;
+; we need to determine the free block bit which will become bits 17-12 of the frame; and
+; remember that since we are 4K frame aligned, bits 11-0 will be 0.
+;----------------------------------------------------------------------------------------------
+
+.found:											; if we get here, we found a frame to use
+				mov			rbx,r13				; get the address of the var to store index
+				mov			qword [rbx],r14		; store the index
+
+				mov			rax,rcx				; move the bitmap to rax
+				xor			rcx,rcx				; start at the lowest mem bit
+
+.loop2:
+				mov			rdx,1				; set a bit to check
+				shl			rdx,cl				; shift the bit to the proper location
+				test		rax,rdx				; check the bit
+				jnz			.bitFound			; we founf the proper bit; exit loop
+
+				add			rcx,1				; move to the next bit
+				cmp			rcx,64				; have we checked them all?
+				jae			.noneFound			; if we exhaust our options, exit with -1
+
+				jmp			.loop2				; loop some more
+
+.bitFound:
+;----------------------------------------------------------------------------------------------
+; now, we know the following:
+;   * rbx holds the address of the PMMBitMap
+;   * rax holds the bitmap we found to have a free frame (which we don't need anymore)
+;   * r14 holds the qword offset for the bitmap; this becomes the bits 63-18 of the frame
+;   * rcx holds the bit number for the addr; this becomes bits 17-12 of the frame
+;
+; now we just need to assemble the final address, and mark the bit as used
+;----------------------------------------------------------------------------------------------
+
+				shl			r14,6				; assemble in r14; make room for the bit#
+				or			r14,rcx				; mask in the bit number
+				shl			r14,12				; now we have the proper address in r14
+
+				push		r14					; push it on the stack for a parm
+				call		PMMSetBitUsed		; set the bit as used
+				pop			rax					; set the return value as well
+
+.out:
+				popfq
+				pop			r15					; restore r15
+				pop			r14					; restore r14
+				pop			r13					; restore r13
+				pop			rsi					; restore rsi
+				pop			rdx					; restore rdx
+				pop			rcx					; restore rcx
+				pop			rbx					; restore rbx
+				pop			rbp
+				ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; qword PMMAllocMem(void) -- Allocate memory.  This function will first look for memory in
+;                            the upper memory section.  If that fails, then it will look for
+;                            memory in the lower memory section.  If the allocation fails,
+;                            return -1 for the frame
+;----------------------------------------------------------------------------------------------
+
+				global		PMMAllocMem
+
+PMMAllocMem:
+				push		rbp					; create a new stack frame
+				mov			rbp,rsp
+
+				call		PMMAllocUpperMem	; try to get a page of upper memory
+				cmp			rax,qword 0xffffffffffffffff	; did we get a frame?
+				jne			.out				; we got a frame, exit
+
+				call		PMMAllocLowerMem	; try to get a page of lower memory
+												; the return value falls through
+.out:
+				pop			rbp
+				ret
+
+;==============================================================================================
+
+				global		PMMPrintMap
+
+PMMPrintMap:
+				push		rbp
+				mov			rbp,rsp
+				push		rbx
+				push		rcx
+				push		rdx
+				push		rsi
+
+				call		TextClear
+
+				mov			rsi,qword PMMBitMap
+				mov			rcx,(80*25)-1
+
+.loop:
+				xor			rbx,rbx
+				xor			rax,rax
+				xor			rdx,rdx
+
+				mov			rax,qword [rsi]
+
+.chk:
+				cmp			rax,qword 0
+				je			.zero
+
+				mov			rbx,qword 0xffffffffffffffff
+				cmp			rax,rbx
+				je			.one
+
+				push		qword '-'
+				jmp			.put
+
+.zero:
+				push		qword '0'
+				jmp			.put
+
+.one:
+				push		qword '1'
+
+.put:
+				call		TextPutChar
+				add			rsp,8
+
+				dec			rcx
+				add			rsi,8
+				cmp			rcx,0
+				jne			.loop
+
+				pop			rsi
+				pop			rdx
+				pop			rcx
+				pop			rbx
+				pop			rbp
+				ret
