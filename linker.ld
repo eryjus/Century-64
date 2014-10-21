@@ -40,6 +40,7 @@ SECTIONS
 	.boot :
 	{
 		*(.multiboot)
+		bootClear = .;
 		*(.bootcode)
 		*(.bootstack)
 	}
@@ -54,6 +55,8 @@ SECTIONS
 	}
 
 	. += VIRT_BASE;
+
+	kernelStart = .;
 
 	.text ALIGN(0x1000) : AT(ADDR(.text) - VIRT_BASE)
 	{

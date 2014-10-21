@@ -439,8 +439,6 @@ gdt64enable:
 
 			section		.data
 
-VIRT_BASE	equ			0xffffffff80000000
-
 HelloString:
 			db			'Welcome to Century-64',13
 			db			"  (it's gonna take a century to finish!)",13,13
@@ -500,7 +498,7 @@ StartHigherHalf:
 ; So, with the above information we want to do the following:
 ; 1, 4, & 9 -- These memory blocks will become part of the free memory pool; we will drop both
 ;              high and low memory mappings
-; 2 -- Keep this memory allocated as it holds out GDT (may want to relocate in the future); we
+; 2 -- Keep this memory allocated as it holds our GDT (may want to relocate in the future); we
 ;      will drop the high memory mapping
 ; 3 -- Free this memory back to the free memory pool; we will drop the high and low memory
 ;      mappings
@@ -509,7 +507,8 @@ StartHigherHalf:
 ; 6 -- The kernel proper; we will drop the low memory mapping
 ; 7 -- The bss (a data segment will be added in here somewhere, which we want to keep); we will
 ;      drop the low memory mapping.
-; 8 -- This is the physical memory map for 4G.  It will stay.
+; 8 -- This is the physical memory map for 4G.  It will stay.  We will drop the low memory
+;      mapping for this area.
 ;
 ; **** NOTE ****
 ; This memory map will change as the code grows.  Care has been taken to align the section
@@ -519,10 +518,18 @@ StartHigherHalf:
 				call		TextSetBlockCursor		; create a block cursor
 				call		TextClear				; clear the screen
 
+;----------------------------------------------------------------------------------------------
+; Print the banner text
+;----------------------------------------------------------------------------------------------
+
 				mov			rbx,qword HelloString	; get the hello string to print
 				push		rbx						; and push it on the stack
 				call		TextPutString			; put it on the screen
 				add			rsp,8					; clean up the stack
+
+;----------------------------------------------------------------------------------------------
+; Init Physical Memory Manager
+;----------------------------------------------------------------------------------------------
 
 				call		PMMInit					; initialize the physical pages to used
 				call		CheckMB					; get MB info and map free memory
@@ -536,6 +543,16 @@ StartHigherHalf:
 				push		rbx						; and push the start on the stack
 				call		PMMMarkBlockUsed		; map kernel memory in Physical pages
 				add			rsp,16					; clean up stack
+
+;----------------------------------------------------------------------------------------------
+; Init Virtual Memory Manager & unmap unused memory
+;----------------------------------------------------------------------------------------------
+
+				call		VMMInit					; Initialize the Virtual Memory Manager
+
+;----------------------------------------------------------------------------------------------
+; Just die for now; more to come here
+;----------------------------------------------------------------------------------------------
 
 .loop:
 				cli
