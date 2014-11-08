@@ -34,6 +34,14 @@
 ; 2014/10/13  #172     ADCL  OK, found that the textNumRows and textNumCols variables were
 ;                            misnamed and misused.  I am renaming them to the way they will be
 ;                            used, which is textMaxRow and textMaxCol (the upper limit).
+; 2014/10/20  #177     ADCL  Found that the number of columns was not being calculated properly
+;                            in function TextScrollUp after applying the fix for #172.  The
+;                            code was still taking the max column number as the total number of
+;                            columns.  Added 1 to this value to convert max column number to
+;                            number of columns (since the screen positions are 0-based) and it
+;                            now works.
+; 2014/11/05  #190     ADCL  Also found that the TextClear was having the same issues as #177
+;                            above.  Fixed the calculations and all is right again.
 ;
 ;==============================================================================================
 
@@ -92,9 +100,11 @@ TextClear:
 				mov			edi,dword [rbx]				; and load its contents into rdi
 
 				mov			rbx,qword textMaxRow		; get the address of the max rows #
+				inc			rbx							; convert to number of rows
 				mov			al,byte [rbx]				; and load its contents into al
 
 				mov			rbx,qword textMaxCol		; get the address of the max col #
+				inc			rbx							; convert to number of cols
 				mov			ah,byte [rbx]				; and load its contents into ah
 
 				mul			ah							; mul rows by cols -- result in ax
@@ -574,7 +584,8 @@ TextScrollUp:
 
 				xor			rcx,rcx						; clear rcx
 				mov			rbx,qword textMaxCol		; get the address for the max col #
-				mov			cl,byte [rbx]				; get the number of columns
+				mov			cl,byte [rbx]				; get the max column number
+				inc			cl							; add 1 to it to get the number of cols
 				mov			ah,cl						; save this value for later
 				shl			rcx,1						; multiply by 2 to get words
 				mov			rdx,rcx						; save this value to clear the blank line

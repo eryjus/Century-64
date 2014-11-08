@@ -47,6 +47,10 @@
 ;                            be maintained as clear.
 ;                            Established the final connection to the Physical Memory Manager
 ;                            Initialization.
+; 2015/10/20  #185     ADCL  Removed the *big* alignments as needed; let the linker script
+;                            handle aligning sections.  Small qword or less size alignments for
+;                            system structures left in place.
+;             #180     ADCL  Moved the final GDT into higher memory (in the .data section).
 ;
 ;==============================================================================================
 
@@ -78,7 +82,8 @@ STACKSIZE	equ			0x4000				; 16K stack
 ;==============================================================================================
 ; The .multiboot section will be loaded at 0x100000 (1MB).  It is intended to provide the
 ; necessary data for a multiboot loader to find the information required.  The linker script
-; will put this section first.  Once fully booted, this section will be reclaimed.
+; will put this section first.  Once fully booted, the memory for this section will be
+; reclaimed.
 ;==============================================================================================
 			section		.multiboot
 			align		8
@@ -109,7 +114,7 @@ MultibootHeader:							; Offset  Description
 ; aligned.  Therefore you will see 'align 8' lines throughout this structure.
 ;----------------------------------------------------------------------------------------------
 
-			align		16
+			align		8
 
 MultibootHeader2:							; Description
 			dd			MBMAGIC2			;   multiboot2 magic number
@@ -150,35 +155,38 @@ noFuncMsg:	db			'Extended CPUID functions not available; cannot enter long mode'
 noLongMsg:	db			'Long mode not supported on this CPU; cannot continue',0
 
 ;----------------------------------------------------------------------------------------------
-; These are our own initial GDTs; they will change later and we will not need them after init
+; The following is our initial GDT; we will use it to replace the bootloader GDT right away
 ;----------------------------------------------------------------------------------------------
 
 			align		8
-gdtr1:										; this is out initial GDTR
-			dw			gdt1End-gdt1-1
-			dd			gdt1
-
-gdt1:
+gdt32:
 			dq			0					; GDT entry 0x00
 			dq			0x00cf9A000000ffff	; DGT entry 0x08
 			dq			0x00cf92000000ffff	; GDT entry 0x10
-gdt1End:
+gdt32End:
 
-gdtr64:										; this is the GDT to jump into long mode
-			dw			gdtEnd-gdt-1
-			dd			gdt
+gdtr32:										; this is out initial GDTR
+			dw			gdt32End-gdt32-1
+			dd			gdt32
 
-gdtr:
-			dw			gdtEnd-gdt-1
-			dq			gdt
+
+;----------------------------------------------------------------------------------------------
+; The following is our GDT we need to enter 64-bit code; we will use it to replace the 32-bit
+; GDT
+;----------------------------------------------------------------------------------------------
 
 			align		8
 
-gdt:
+gdt64:
 			dq			0					; GDT entry 0x00
 			dq			0x00a09a0000000000	; GDT entry 0x08
 			dq			0x00a0920000000000	; GDT entry 0x10
-gdtEnd:
+gdt64End:
+
+gdtr64:										; this is the GDT to jump into long mode
+			dw			gdt64End-gdt64-1
+			dd			gdt64
+
 
 mbEAX:		dd			0					; we will store eax from MB here for later
 mbEBX:		dd			0					; we will store ebx from MB here for later as well
@@ -205,8 +213,6 @@ stack32:	times(STACKSIZE)	db		0
 
 			section		.bootcode
 			global		EntryPoint
-			align		0x1000
-
 			bits		32
 
 EntryPoint:
@@ -229,10 +235,11 @@ EntryPoint:
 ; Setup our own GDT -- we don't know where the other has been...
 ;----------------------------------------------------------------------------------------------
 
-			lgdt		[gdtr1]				; Load our own GDT
-			jmp			0x08:.gdt1enable	; we need a jump like this to reload the CS.
+			mov			eax,gdtr32			; get the address of our gdt
+			lgdt		[eax]				; Load our own GDT
+			jmp			0x08:.gdt32enable	; we need a jump like this to reload the CS.
 
-.gdt1enable:
+.gdt32enable:
 			mov			eax,0x10			; set the segment selector for data that we...
 			mov			ds,ax				; ... set to DS
 			mov			es,ax				; ... set to ES
@@ -352,6 +359,26 @@ EntryPoint:
 			wrmsr							; and put the result back
 
 ;----------------------------------------------------------------------------------------------
+; Set up some paging tables with 1GB pages, just to get into long mode; we will replace these
+; later.
+;----------------------------------------------------------------------------------------------
+
+;			mov			eax,PDPT			; get the address of the PDPT table
+;			or			eax,0x03			; make is present and writable
+;			mov			[PML4Table],eax		; set the low entry
+;			mov			[PML4Table+0xff8],eax	; and the high entry
+
+;			mov			eax,PD				; get the address of the page directory table
+;			or			eax,0x03			; make it present and writable
+;			mov			[PDPT],eax			; set the low entry
+;			mov			[PDPT+0xff0],eax	; and the high entry
+
+;			mov			dword [PD],0x00000083	; set the page
+;			mov			dword [PD+8],0x00000083	; set this page
+;			mov			dword [PD+0xff0],0x00000083	; set the page
+;			mov			dword [PD+0xff8],0x00000083	; set this page
+
+;----------------------------------------------------------------------------------------------
 ; Enable paging
 ;----------------------------------------------------------------------------------------------
 
@@ -375,14 +402,13 @@ EntryPoint:
 ; jump to 64-bit code.
 ;----------------------------------------------------------------------------------------------
 
-			lgdt		[gdtr64]			; Load our own GDT
-			jmp			0x08:gdt64enable
+			mov			eax,gdtr64			; get the address of the temporary 64-bit GDT
+			lgdt		[eax]				; Load our own GDT
+			jmp			0x08:gdt64enable	; and jump into 64-bit code space
 
 ;----------------------------------------------------------------------------------------------
 ; Error messages if we are not able to enter long mode
 ;----------------------------------------------------------------------------------------------
-
-
 
 dieMsg:										; we have a message to display...  display it
 			mov			edi,0xb8000			; start un the upper left corner.
@@ -401,9 +427,14 @@ dieMsg:										; we have a message to display...  display it
 .dieNow:	hlt
 			jmp			.dieNow
 
-;----------------------------------------------------------------------------------------------
-; 64-bit code follows from here...
-;----------------------------------------------------------------------------------------------
+
+;**********************************************************************************************
+;**********************************************************************************************
+;**********************************************************************************************
+;******************************  64-bit code follows from here...  ****************************
+;**********************************************************************************************
+;**********************************************************************************************
+;**********************************************************************************************
 
 			bits		64
 			align		8
@@ -430,14 +461,25 @@ gdt64enable:
 ; Now we can jump to the higher half
 ;----------------------------------------------------------------------------------------------
 
-			mov			rax,StartHigherHalf
-			jmp			rax
+			mov			rax,StartHigherHalf		; get the address of our higher-half entry
+			jmp			rax						; and jump to it
 
 ;==============================================================================================
 ; The .data segment will hold all data related to the kernel
 ;==============================================================================================
 
 			section		.data
+
+			align		8
+gdt:
+			dq			0					; GDT entry 0x00
+			dq			0x00a09a0000000000	; GDT entry 0x08
+			dq			0x00a0920000000000	; GDT entry 0x10
+gdtEnd:
+
+gdtr:
+			dw			gdtEnd-gdt-1
+			dq			gdt
 
 HelloString:
 			db			'Welcome to Century-64',13
@@ -447,6 +489,9 @@ HelloString:
 			db			"------- (*)/ (*)  (*)/ (*)  (*)/ (*)  (*)/ (*)",13
 			db			"~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",13
 			db			"   ... speed is good!",13,13,0
+
+kHeapMsg:
+			db			'                     This is a test kHeap error message',0
 
 ;==============================================================================================
 ; The .text section is the 64-bit kernel proper
@@ -466,8 +511,9 @@ StartHigherHalf:
 ; at this point.
 ;----------------------------------------------------------------------------------------------
 
-			lgdt		[gdtr]							; Load our own GDT
-			jmp		.gdtenable
+			mov			rax,qword gdtr					; get the address of our GDT
+			lgdt		[rax]							; Load our own 64-bit GDT
+			jmp			.gdtenable
 
 .gdtenable:
 			mov			eax,0x10						; set the segment selector for DS
@@ -481,6 +527,19 @@ StartHigherHalf:
 			mov			word [ebx+(7*2)],0x0f<<8|'H'	; put a "H" on the screen
 
 ;----------------------------------------------------------------------------------------------
+;
+;   ****************************************************************************************
+;   ********                                                                        ********
+;   ********                         !!!!!  NOTE  !!!!!                             ********
+;   ********                                                                        ********
+;   ********  This memory layout is in a state of significant change.  Therefore,   ********
+;   ********  some of the intermediate commits with this code will not show an      ********
+;   ********  accurate memory map.  Use are when referring to this table.           ********
+;   ********                                                                        ********
+;   ********  This note will be removed once properly corrected.                    ********
+;   ********                                                                        ********
+;   ****************************************************************************************
+;
 ; At this point, a 2M memory layout looks like this:
 ;
 ; #	Physical Addr	Size		Virtual Addr 1			Virtual Addr 2			Usage
@@ -545,10 +604,17 @@ StartHigherHalf:
 				add			rsp,16					; clean up stack
 
 ;----------------------------------------------------------------------------------------------
+; Init kernel memory manager
+;----------------------------------------------------------------------------------------------
+
+				call		HeapInit				; initialize the heap
+
+;----------------------------------------------------------------------------------------------
 ; Init Virtual Memory Manager & unmap unused memory
 ;----------------------------------------------------------------------------------------------
 
-				call		VMMInit					; Initialize the Virtual Memory Manager
+;				call		VMMInit					; Initialize the Virtual Memory Manager
+
 
 ;----------------------------------------------------------------------------------------------
 ; Just die for now; more to come here

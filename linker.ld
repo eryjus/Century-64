@@ -43,16 +43,10 @@ SECTIONS
 		bootClear = .;
 		*(.bootcode)
 		*(.bootstack)
+		*(.paging)
 	}
 
 	bootEnd = .;
-
-	. = 0x108000;
-
-	.paging :
-	{
-		*(.paging)
-	}
 
 	. += VIRT_BASE;
 

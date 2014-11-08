@@ -10,6 +10,49 @@
 ;
 ;==============================================================================================
 
+;----------------------------------------------------------------------------------------------
+; -- the following macros are to make coding simpler
+;----------------------------------------------------------------------------------------------
+
+%define			add.b		add byte
+%define			add.w		add word
+%define			add.d		add dword
+%define			add.q		add qword
+
+%define			and.b		and byte
+%define			and.w		and word
+%define			and.d		and dword
+%define			and.q		and qword
+
+%define			cmp.b		cmp byte
+%define			cmp.w		cmp word
+%define			cmp.d		cmp dword
+%define			cmp.q		cmp qword
+
+%define			lea.b		lea byte
+%define			lea.w		lea word
+%define			lea.d		lea dword
+%define			lea.q		lea qword
+
+%define			mov.b		mov byte
+%define			mov.w		mov word
+%define			mov.d		mov dword
+%define			mov.q		mov qword
+
+%define			sub.b		sub byte
+%define			sub.w		sub word
+%define			sub.d		sub dword
+%define			sub.q		sub qword
+
+%define			test.q		test byte
+%define			test.w		test word
+%define			test.d		test dword
+%define			test.q		test qword
+
+%define			xor.b		xor byte
+%define			xor.w		xor word
+%define			xor.d		xor dword
+%define			xor.q		xor qword
 
 ;----------------------------------------------------------------------------------------------
 ; -- the following symbols are added by the linker
@@ -38,6 +81,8 @@ VIRT_BASE		equ			0xffffffff80000000
 
 %ifndef	__PAGETABLES_S__
 				extern		PML4Table
+				extern		PDPT
+				extern 		PD
 %endif
 
 ;----------------------------------------------------------------------------------------------
@@ -77,6 +122,16 @@ VIRT_BASE		equ			0xffffffff80000000
 ;----------------------------------------------------------------------------------------------
 ; -- the following symbols are found in virtmm.s
 ;----------------------------------------------------------------------------------------------
+
+;----------------------------------------------------------------------------------------------
+; -- the following symbols are found in kheap.s
+;----------------------------------------------------------------------------------------------
+
+%ifndef	__KHEAP_S__
+				extern		HeapInit
+				extern		kmalloc
+				extern		kfree
+%endif
 
 ;----------------------------------------------------------------------------------------------
 ; These flags are used to identify the type of page in the paging tables.  These flags are
