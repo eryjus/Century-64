@@ -609,6 +609,96 @@ StartHigherHalf:
 
 				call		HeapInit				; initialize the heap
 
+.test:
+				push		'.'
+				call		TextPutChar
+				add.q		rsp,8
+
+				push		64						; get 64 bytes of mem
+				call		kmalloc					; allocate memory
+				mov.q		r15,rax					; save the result in r15
+
+				call		kmalloc					; allocate memory
+				mov.q		r14,rax					; save the result in r14
+
+				call		kmalloc					; allocate memory
+				mov.q		r13,rax					; save the result in r13
+
+				call		kmalloc					; allocate memory
+				mov.q		r12,rax					; save the result in r12
+
+				call		kmalloc					; allocate memory
+				mov.q		r11,rax					; save the result in r11
+
+				call		kmalloc					; allocate memory
+				mov.q		r10,rax					; save the result in r10
+
+				call		kmalloc					; allocate memory
+				mov.q		r9,rax					; save the result in r9
+
+				call		kmalloc					; allocate memory
+				mov.q		r8,rax					; save the result in r8
+
+				call		kmalloc					; allocate memory
+				mov.q		rdi,rax					; save the result in rdi
+
+				call		kmalloc					; allocate memory
+				mov.q		rsi,rax					; save the result in rsi
+
+				call		kmalloc					; allocate memory
+				mov.q		rdx,rax					; save the result in rdx
+
+				call		kmalloc					; allocate memory
+				mov.q		rcx,rax					; save the result in rcx
+
+				call		kmalloc					; allocate memory
+				mov.q		rbx,rax					; save the result in rbx
+
+
+				mov.q		[rsp],r8
+				call		kfree
+
+				mov.q		[rsp],r15
+				call		kfree
+
+				mov.q		[rsp],rsi
+				call		kfree
+
+				mov.q		[rsp],rbx
+				call		kfree
+
+				mov.q		[rsp],rdi
+				call		kfree
+
+				mov.q		[rsp],r12
+				call		kfree
+
+				mov.q		[rsp],r13
+				call		kfree
+
+				mov.q		[rsp],r14
+				call		kfree
+
+				mov.q		[rsp],r9
+				call		kfree
+
+				mov.q		[rsp],rcx
+				call		kfree
+
+				mov.q		[rsp],rdx
+				call		kfree
+
+				mov.q		[rsp],r10
+				call		kfree
+
+				mov.q		[rsp],r11
+				call		kfree
+
+				add.q		rsp,8
+
+				jmp			.test
+
+
 ;----------------------------------------------------------------------------------------------
 ; Init Virtual Memory Manager & unmap unused memory
 ;----------------------------------------------------------------------------------------------
