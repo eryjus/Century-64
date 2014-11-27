@@ -1,4 +1,4 @@
-==============================================================================================
+;==============================================================================================
 ;
 ; kheap.s
 ;
@@ -62,7 +62,8 @@
 ; ** NOTE **:
 ; An important assumption in this implementation is as follows: No requests to the kernel heap
 ; manager will need to be page aligned.  All requests that need to be page aligned will go
-; through the Virtual Memory Manager and will be whole pages.
+; through the Virtual Memory Manager and therefore the physical memory manager and will be
+; whole pages.
 ;
 ; The following functions are published in this source:
 ;   qword kmalloc(qword size);
@@ -74,8 +75,6 @@
 ;   qword FindHole(qword AdjustedSize);
 ;   qword MergeLeft(qword blockHdr);
 ;   qword MergeRight(qword blockHdr);
-;   qword NewListEntry(qword HdrAddr, qword AddIt);
-;   void ReleaseEntry(qword blockHdr);
 ;   void RemoveFromList(qword blockHdr);
 ;   qword SplitBlock(qword blockHdr, qword Size);
 ;
@@ -109,7 +108,9 @@ ALLOC_MIN       equ     (KHeapHdr_size+KHeapFtr_size+ALLOC_MIN_BLK+ALLOC_MULT)&~
 
 KHEAP_MAGIC     equ     0xbab6badc
 
-HEAP_START      equ     0xffff800000000000  ; this is the starting point for the kernel heap
+HEAP_START      equ     0xffffa00000000000  ; this is the starting point for the kernel heap
+HEAP_END        equ     0xffffafffffffffff  ; this is the ending point for the kernel heap
+HEAP_SIZE       equ     0x100000            ; the initial kernel heap mapped size (may expand)
 
 HEAP_PTR1       equ     512             ; anything >= 512 bytes
 HEAP_PTR2       equ     1024            ; anything >= 1K bytes
@@ -590,24 +591,50 @@ HeapInit:       push        rbp                     ; save caller's frame
                 push        rsi                     ; save rsi -- used for header address
                 push        r14                     ; save r14 -- used for footer address
 
+;----------------------------------------------------------------------------------------------
+; First, set up the heap structure with our initial values
+;----------------------------------------------------------------------------------------------
+
                 mov.q       rbx,kHeap               ; get the heap struct address
 
-                mov.q       rcx,bssEnd              ; get the ending address
+                mov.q       rcx,HEAP_START          ; get the ending address
                 mov.q       [rbx+KHeap.strAddr],rcx ; the starting heap address
 
-                add.q       rcx,0x100000            ; set up for 1 MB heap
-                and.q       rcx,0xfffffffffff00000  ; align back to under 1MB
+                add.q       rcx,HEAP_SIZE           ; set up for 1 MB heap
                 mov.q       [rbx+KHeap.endAddr],rcx ; store the ending address
 
-                mov.q       [rbx+KHeap.maxAddr],0xffffffffcfffffff  ; the theoretical max of heap
+                mov.q       rax,HEAP_END            ; the theoretical max of heap
+                mov.q       [rbx+KHeap.maxAddr],rax ; stored in the proper location
 
                 mov.q       rcx,[rbx+KHeap.endAddr] ; get the heap ending address
                 sub.q       rcx,[rbx+KHeap.strAddr] ; this is the size of the block
+
+;----------------------------------------------------------------------------------------------
+; we need to map (and allocate) our heap memory from the VMM
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rax,HEAP_SIZE           ; get the initial size
+                shr.q       rax,12                  ; convert it to the number of pages
+                push        rax                     ; save it as a parm
+
+                mov.q       rax,HEAP_START          ; get the starting address of the heap
+                push        rax                     ; save it as a parm
+
+                call        VMMAlloc                ; go allocate and map the memory
+                add.q       rsp,16                  ; clean up the stack
+
+;----------------------------------------------------------------------------------------------
+; Now, set up our heap header and heap footer pointers
+;----------------------------------------------------------------------------------------------
 
                 mov.q       r14,[rbx+KHeap.endAddr] ; get the footer address (calc)
                 sub.q       r14,KHeapFtr_size       ; r14 now holds the footer address
 
                 mov.q       rsi,[rbx+KHeap.strAddr] ; get the address of the hdr
+
+;----------------------------------------------------------------------------------------------
+; fill in our heap header information
+;----------------------------------------------------------------------------------------------
 
                 mov.d       [rsi+KHeapHdr.magic],KHEAP_MAGIC    ; set the magic number
                 mov.d       [rsi+KHeapHdr.hole],0   ; pretend this is allocated
@@ -615,14 +642,26 @@ HeapInit:       push        rbp                     ; save caller's frame
                 mov.q       [rsi+KHeapHdr.prev],0   ; set the prev ordered list entry
                 mov.q       [rsi+KHeapHdr.next],0   ; set the next ordered list entry
 
+;----------------------------------------------------------------------------------------------
+; fill in our heap footer information
+;----------------------------------------------------------------------------------------------
+
                 mov.d       [r14+KHeapFtr.magic],KHEAP_MAGIC    ; set the magic number
                 mov.d       [r14+KHeapFtr.fill],0   ; set the fill value
                 mov.q       [r14+KHeapFtr.hdr],rsi  ; set the header pointer
+
+;----------------------------------------------------------------------------------------------
+; now, add the block as a free block
+;----------------------------------------------------------------------------------------------
 
                 add.q       rsi,KHeapHdr_size       ; adjust for the header
                 push        rsi                     ; push the block address onto stack
                 call        kfree                   ; 'trick' the system to free the block
                 add.q       rsp,8                   ; clean up the stack
+
+;----------------------------------------------------------------------------------------------
+; finally, clean up and exit
+;----------------------------------------------------------------------------------------------
 
                 pop         r14                     ; restore r14
                 pop         rsi                     ; restore rsi

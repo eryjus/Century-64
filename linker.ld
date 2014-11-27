@@ -23,18 +23,32 @@
 /*                            here.                                                          */
 /* 2014/10/05  Initial  ADCL  Changed the command file to properly link 64-bit code at       */
 /*                            0xfffffff800000000.                                            */
+/* 2014/11/14  #200     ADCL  Reset the kernel address as follows:                           */
+/*                            0xffff 8000 0000 0000 -- Kernel code virtual base              */
+/*                            0xffff 9000 0000 0000 -- Kernel data and bss sections          */
+/*                            0xffff a000 0000 0000 -- Kernel heap                           */
+/*                            0xffff b000 0000 0000 -- Driver code                           */
+/*                            0xffff c000 0000 0000 -- Driver data and bss                   */
+/*                            0xffff d000 0000 0000 -- Driver heap                           */
+/*                            0xffff e000 0000 0000 -- Kernel/driver shared data ( ???? )    */
+/*                            0xffff ff80 0000 0000 -- Page Tables                           */
+/*                            0xffff ffff c000 0000 -- Page Directories                      */
+/*                            0xffff ffff ffe0 0000 -- Page Directory Pointer Tables         */
+/*                            0xffff ffff ffff f000 -- PML4 Table                            */
 /*                                                                                           */
 /*===========================================================================================*/
 
-
 ENTRY(EntryPoint)
+OUTPUT_FORMAT(elf64-x86-64)
 
-PAGING = 0x0000000000400000;		/* 4MB */
-VIRT_BASE = 0xffffffff80000000;
+ENTRY_BASE = 0x0000000000100000;
+CODE_VIRT  = 0xffff800000000000;
+DATA_VIRT  = 0xffff900000000000;
+DATA_PHYS  = 0x0000000000200000;
 
 SECTIONS
 {
-	. = 0x100000;
+	. = ENTRY_BASE;
 	bootStart = .;
 
 	.boot :
@@ -42,28 +56,33 @@ SECTIONS
 		*(.multiboot)
 		bootClear = .;
 		*(.bootcode)
+		*(.bootdata)
+		*(.boot2)
 		*(.bootstack)
-		*(.paging)
 	}
 
 	bootEnd = .;
 
-	. += VIRT_BASE;
+	. += CODE_VIRT;
 
 	kernelStart = .;
 
-	.text ALIGN(0x1000) : AT(ADDR(.text) - VIRT_BASE)
+	.text ALIGN(0x1000) : AT(ADDR(.text) - CODE_VIRT)
 	{
 		*(.text)
 		*(.rodata)
 	}
 
-	.data ALIGN(0x1000) : AT(ADDR(.data) - VIRT_BASE)
+	kernelEnd = .;
+
+	. = DATA_VIRT;
+
+	.data ALIGN(0x1000) : AT(DATA_PHYS)
 	{
 		*(.data)
 	}
 
-	.bss ALIGN(0x1000) : AT(ADDR(.bss) - VIRT_BASE)
+	.bss ALIGN(0x1000) : AT(DATA_PHYS + SIZEOF(.data))
 	{
 		*(COMMON)
 		*(.bss)

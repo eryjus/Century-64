@@ -2,36 +2,25 @@
 ;
 ; mbcheck.s
 ;
-; This file contains the initial functions that will parse the multiboot structures and report
-; and/or store the results.
-;
-; Currently, this is a 64-bit .text section of code, but might be better moved to a 64-bit
-; .boot section of code since it will only get executed once.
+; This file contains the functions that will parse and report the multiboot structures as
+; requested.
 ;
 ; The following functions are provided in this source file:
-;   void CheckMB(void);
+;   qword CheckMB(void);
+;   qword GetMemLimit(void);
+;   qword GetFreeFirst(void);
+;   qword GetFreeNext(void);
 ;
-; The following functions are internal functions not availeble publicly:
-;   void LoadMB1Info(void);
-;   void LoadMB2Info(void);
-;   void LoadNonMBInfo(void);
-;   void ReportResults(void);
-;
-;   void MB1GetMemLimits(register MBInfo *mbi);
-;   void MB1GetBootDrive(register MBInfo *mbi);
-;   void MB1GetCmdLine(register MBInfo *mbi);
-;   void MB1GetMods(register MBInfo *mbi);
-;   void MB1GetAOUT(register MBInfo *mbi); -- STUB
-;   void MB1GetELF(register MBInfo *mbi); -- STUB
-;   void MB1GetMMap(register MBInfo *mbi);
-;   void MB1GetDrives(register MBInfo *mbi); -- STUB
-;   void MB1GetConfig(register MBInfo *mbi); -- STUB
-;   void MB1GetBootLoaderName(register MBInfo *mbi); -- STUB
-;   void MB1GetAPMTable(register MBInfo *mbi); -- STUB
-;   void MB1GetVBE(register MBInfo *mbi); --STUB
+; The following are internal functions also in this source file:
+;   qword MB1GetMemLimit(void);
+;   qword MB2GetMemLimit(void);
+;   qword OthGetMemLimit(void);
+;   qword MB1GetFreeFirst(void);
+;   qword MB1GetFreeNext(void);
+;   qword FreeSetNULL(void);
 ;
 ;    Date     Tracker  Pgmr  Description
-; ----------  ------   ----  ------------------------------------------------------------------
+; ----------  -------  ----  ------------------------------------------------------------------
 ; 2014/10/07  Initial  ADCL  Initial code
 ; 2014/10/12  #169     ADCL  For me, the ABI standard is causing me issues. For whatever reason,
 ;                            I am having trouble keeping track of "registers I want to save as
@@ -40,6 +29,23 @@
 ;                            be easier to manage, with the exception of rax.  DF in rFLAGS will
 ;                            be maintained as clear.
 ;                            At the same time reformat for spacing
+; 2014/11/15  #200     ADCL  Some changes were necessary when the code was relocated.  Some
+;                            function calls between the .text and .boot2 segments were required
+;                            to be far calls.
+; 2014/11/21  #200     ADCL  So, I think it is time to completely gut this source file and
+;                            rewrite it from (nearly) scratch.  Rather than taking the approach
+;                            that I need to collect all information possible before I start
+;                            initializing, I think it would be better to accept queries for
+;                            specific information and reporting the results.  Of particular
+;                            note in this area is the physical memory manager.  While I am
+;                            writing this comment, the function to report the results of the
+;                            MultiBoot Information structure is responsible for the
+;                            initialization details of the physical memory manager.  I cannot
+;                            see this as correct approach.  Instead, I can see the PMM
+;                            initialization function asking for a highest possible address and
+;                            asking for a block of free memory as reported by Multiboot.  So,
+;                            the resulting source file after this next commit is going to be
+;                            quite different from the previuos commits.
 ;
 ;==============================================================================================
 
@@ -49,865 +55,624 @@
 MAGIC1          equ         0x2badb002
 MAGIC2          equ         0x36d76289
 
-MBMAXMODS       equ         8
-MOD_START       equ         0x00                ; offset to the mod_start member
-MOD_END         equ         0x04                ; offset to the mod_end member
-MOD_STRING      equ         0x08                ; offset to teh mod_string member
-MOD_SIZE        equ         0x10                ; the size of an individual entry
+DFT_MEM         equ         4*1024*1024*1024
 
-MBMAXMMAP       equ         512                 ; the maximum number of bytes in the mmap
+struc MB1
+    .flags      resd        1
+    .memLower   resd        1
+    .memUpper   resd        1
+    .bootDevice resd        1
+    .cmdLine    resd        1
+    .modsCount  resd        1
+    .modsAddr   resd        1
+    .syms       resd        4
+    .mmapLength resd        1
+    .mmapAddr   resd        1
+    .drivesLen  resd        1
+    .drivesAddr resd        1
+    .configTbl  resd        1
+    .bootLdrNm  resd        1
+    .apmTable   resd        1
+    .vbeCtrlInf resd        1
+    .vbeModeInf resd        1
+    .vbeMode    resd        1
+    .vbeIfcSeg  resd        1
+    .vbeIfcOff  resd        1
+    .vbeIfcLen  resd        1
+endstruc
+
+struc MB1MMap
+    .size       resd        1
+    .baseAddr   resq        1
+    .length     resq        1
+    .type       resd        1
+endstruc
+
+MB1_MMAP_FLAG   equ         1<<6
 
 ;==============================================================================================
-; The .data section contains global variables
+; The .data section contains variables for this source module.
 ;==============================================================================================
 
                 section     .data
 
-bootMsg1        db          'Determined that this kernel was booted by a ',0
-bootMB1         db          'Multiboot 1 compliant boot loader',13,0
-bootMB2         db          'Multiboot 2 compliant boot loader',13,0
-bootNonMB       db          'non-compliant boot loader',13,0
-mbBadAddr       db          'The multiboot information pointer is not valid; '
-                db          'attempting a non-MB compliant setup',13,0
+MBType          dq          0                       ; 0=Other; 1=MB2; 2=<B2
+MBMMAPGood      db          0                       ; 0=Not good; <>0 good
+                align       8
 
-MMapError       db          'WARNING: the multiboot memory map exceeded the space allocated'
-                db          13,0
+mbFreeMem       istruc      FreeMem
+.str            dq          0
+.end            dq          0
+.addr           dd          0
+.len            dd          0
+                iend
 
-NoMMap          db          'There is no Memory Map data found; assuming 4GB',13,0
+_GetMemLimit    dq          OthGetMemLimit
+                dq          MB1GetMemLimit
+                dq          MB2GetMemLimit
 
-mmapType        db          ' of type ',0
-mmapLen         db          ' length ',0
+_GetFreeFirst   dq          FreeSetNULL
+                dq          MB1GetFreeFirst
+                dq          FreeSetNULL
 
-mbiMemGood      db          0                   ; do we have good mbi.mem* info?
-mbiMemLower     dd          0                   ; the mbi.mem_lower value
-mbiMemUpper     dd          0                   ; the mbi.mem_upper value
-
-mbiBootDrvGood  db          0                   ; do we have good mbi.boot_device info?
-mbiBootDevice   dd          0                   ; the mbi.boot_device value
-
-mbiCmdLnGood    db          0                   ; do we have good mbi.cmdline info?
-mbiCmdLine      dq          0                   ; the mbi.cmdline value
-
-mbiModsGood     db          0                   ; do we have good mbi_mods* info
-mbiModsCnt      dd          0                   ; the number of mods loaded (s/b <=MBMAXMODS)
-mbiModsTbl      times (MBMAXMODS * 4)   dd  0   ; this is the table for the modules
-
-mbiAOUTGood     db          0                   ; do we have good a.out symbol info?
-mbiAOUTTabSize  dd          0                   ; the mbi.aout_tabsize value
-mbiAOUTStrSize  dd          0                   ; the mbi.aout_strsize value
-mbiAOUTAddr     dd          0                   ; the mbi.aout_addr value
-
-mbiELFGood      db          0                   ; do we have good elf symbol info?
-mbiELFNum       dd          0                   ; the mbi.elf_num value
-mbiELFsize      dd          0                   ; the mbi.elf_size value
-mbiELFAddr      dd          0                   ; the mbi.elf_addr value
-mbiELFShndx     dd          0                   ; the mbi.elf_shndx value
-
-mbiMMapGood     db          0                   ; do we have a good memory map?
-mbiMMapLen      dd          0                   ; size of the memory map
-                dd          0                   ; this field is actually part of the nxt struct
-mbiMMap         times(MBMAXMMAP)    dd  0       ; the memory map table
-
-mbiDrvsGood     db          0                   ; do we have good drives info?
-mbiDrvLen       dd          0                   ; the mbi.drives_length value
-mbiDrvAddr      dd          0                   ; the mbi.drived_addr value
-
-mbiCfgGood      db          0                   ; do we have a good Config table?
-mbiCfgTable     dd          0                   ; the mbi.config_table value
-
-mbiLdrGood      db          0                   ; do we ahve a good boot loader name?
-mbiLoaderName   dd          0                   ; the mbi.boot_loader_name value
-
-mbiApmGood      db          0                   ; do we have good APM info?
-mbiApmTable     dd          0                   ; the mbi.amp_table value
-
-mbiVBEGood      db          0                   ; do we have good vbe info?
-mbiVBECtrl      dd          0                   ; the mbi.vbe_control_info value
-mbiVBEModeInfo  dd          0                   ; the mbi.vbe_mode_info value
-mbiVBEMode      dw          0                   ; the mbi.vbe_mode value
-mbiVBEIfcSeg    dw          0                   ; the mbi.vbe_interface_seg value
-mbiVBEIfcOff    dw          0                   ; the mbi.vbe_interface_off value
-mbiVBEIfcLen    dw          0                   ; the mbi.vbe_interface_len value
+_GetFreeNext    dq          FreeSetNULL
+                dq          MB1GetFreeNext
+                dq          FreeSetNULL
 
 ;==============================================================================================
-; The .text section is the 64-bit kernel proper -- might change this section to be .boot.
+; The .boot2 section is the 64-bit initialization code
 ;==============================================================================================
 
-                section     .boot
+                section     .boot2
                 bits        64
 
 ;----------------------------------------------------------------------------------------------
-; void CheckMB(void) -- Check the multiboot magic number and determine if the kernel was booted
-;                       with a compliant boot loader.  If so, branch to the proper function to
-;                       load out internal structures.
+; qword CheckMB(void) -- Check the multiboot magic number and determine if the kernel was
+;                        booted with a compliant boot loader.
 ;----------------------------------------------------------------------------------------------
 
                 global      CheckMB
 
 CheckMB:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; we will modify rbx
 
-                mov         rbx,qword bootMsg1          ; get the message prolog
-                push        rbx                         ; and push it on the stack
-                call        TextPutString               ; display the message
-                add         rsp,8                       ; clean up the stack
+;----------------------------------------------------------------------------------------------
+; get the original value given to us by multiboot
+;----------------------------------------------------------------------------------------------
 
-                xor         rax,rax                     ; clear rax
-                mov         rbx,qword mbEAX             ; get the affress of the var
-                mov         eax,dword [rbx]             ; get the value
+                xor.q       rax,rax                 ; clear rax
+                mov.q       rbx,mbEAX               ; get the address of the var
+                mov.d       eax,[rbx]               ; get the value -- lower 32 bits
 
-                cmp         eax,MAGIC1                  ; multiboot 1?
-                jne         .chk2                       ; if not check mb2
+;----------------------------------------------------------------------------------------------
+; Check for a Multiboot 1 signature
+;----------------------------------------------------------------------------------------------
 
-                mov         rbx,qword bootMB1           ; get the message for MB1
-                push        rbx                         ; and push it on the stack
-                call        TextPutString               ; display the message
-                add         rsp,8                       ; clean up the stack
+                cmp.d       eax,MAGIC1              ; multiboot 1?
+                jne         .chk2                   ; if not check mb2
 
-                call        LoadMB1Info                 ; call the function to get data
+                mov.q       rbx,MBType              ; get the address for MBType var
+                mov.q       [rbx],1                 ; set the Multiboot type to 1
+                jmp         .out                    ; we can skip the rest
 
-                jmp         .out                        ; we can skip the rest
+;----------------------------------------------------------------------------------------------
+; Check for a Multiboot 2 signature
+;----------------------------------------------------------------------------------------------
 
-.chk2:
-                cmp         eax,MAGIC2                  ; multiboot 2?
-                jne         .other                      ; if not, report another boot loader
+.chk2:          cmp.d       eax,MAGIC2              ; multiboot 2?
+                jne         .other                  ; if not, report another boot loader
 
-                mov         rbx,qword bootMB2           ; get the message for MB2
-                push        rbx                         ; and push it on the stack
-                call        TextPutString               ; display the message
-                add         rsp,8                       ; clean up the stack
+                mov.q       rbx,MBType              ; get the address for MBType var
+                mov.q       [rbx],2                 ; set the Multiboot type to 2
+                jmp         .out                    ; we can skip the rest
 
-                call        LoadMB2Info                 ; call the function to get data
+;----------------------------------------------------------------------------------------------
+; Anything else and we just don't know
+;----------------------------------------------------------------------------------------------
 
-                jmp         .out                        ; we can skip the rest
+.other:         mov.q       rbx,MBType              ; get the address for MBType var
+                mov.q       [rbx],0                 ; set the Multiboot type to 3 (other)
 
-.other:
-                mov         rbx,qword bootNonMB         ; get the non-compliant boot loader msg
-                push        rbx                         ; and push it on the stack
-                call        TextPutString               ; display the message
-                add         rsp,8                       ; clean up the stack
+;----------------------------------------------------------------------------------------------
+; Clean up and exit
+;----------------------------------------------------------------------------------------------
 
-                call        LoadNonMBInfo               ; call the function to get data
+.out:           mov.q       rax,[rbx]               ; set the return value
 
-.out:
-                call        ReportResults               ; print the results of our search...
-
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
                 ret
 
 ;==============================================================================================
 
 ;----------------------------------------------------------------------------------------------
-; void LoadMB1Info(void) -- Read the MB1 data structures and load our data structures
+; qword GetFreeFirst(void) -- Returns an address to a structure containing a memory start/end
+;                             of free memory.
 ;----------------------------------------------------------------------------------------------
 
-LoadMB1Info:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
+                global      GetFreeFirst
+
+GetFreeFirst:
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
+
+                mov.q       rax,MBType              ; get the address of the MBType var
+                mov.q       rax,[rax]               ; now get its contents
+                shl.q       rax,3                   ; convert to qwords (by 8)
+
+                mov.q       rbx,_GetFreeFirst       ; get the offset into the address array
+                mov.q       rax,[rbx+rax]           ; get the address of the real function
+                call        rax                     ; this is a far call
+
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
+
+;==============================================================================================
 
 ;----------------------------------------------------------------------------------------------
-; First make sure we have a good address
+; qword GetFreeNext(void) -- Returns an address to a structure containing a memory start/end
+;                            of free memory.
 ;----------------------------------------------------------------------------------------------
 
-                xor         rax,rax                     ; clear rax
-                mov         rbx,qword mbEBX             ; get the information address
-                mov         eax,dword [rbx]             ; rax now should have the hdr address
+                global      GetFreeNext
 
-                cmp         rax,0                       ; is the address a good one?
-                jne         .goodAddr                   ; if not 0, assume good
+GetFreeNext:
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
 
-                mov         rbx,qword mbBadAddr         ; load the address of the error msg
-                push        rbx                         ; and put it on the stack
-                call        TextPutString               ; print the error msg
-                add         rsp,8                       ; clean up
+                mov.q       rax,MBType              ; get the address of the MBType var
+                mov.q       rax,[rax]               ; now get its contents
+                shl.q       rax,3                   ; convert to qwords (by 8)
 
-                call        LoadNonMBInfo               ; try to see what info we can get
-                jmp         .out
+                mov.q       rbx,_GetFreeNext        ; get the offset into the address array
+                mov.q       rax,[rbx+rax]           ; get the address of the real function
+                call        rax                     ; this is a far call
 
-;----------------------------------------------------------------------------------------------
-; Start by getting the flags to see what might be good; print the meta information
-;----------------------------------------------------------------------------------------------
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
 
-.goodAddr:
-
-                mov         rbx,rax                     ; move the address to the rbx reg
-                xor         rax,rax                     ; clear rax
-                mov         eax,dword [rbx]             ; get the flags
+;==============================================================================================
 
 ;----------------------------------------------------------------------------------------------
-; At this point, rax holds the flags and rbx holds the address of the info struct
+; qword MB1GetFreeFirst(void) -- For the MB1 structures, return the first free block of memory
+;                                by setting up the structures in mbFreeMem and then return the
+;                                pointer to this structure.  If nothing is free, then set the
+;                                structures to 0 and return 0.  Keep in mind that this is
+;                                highly unlikely if we have a good memory map.
 ;
-; test flag 11
+; We have already done all the pre-checking for this when we call GetMemLimit(), which is
+; guaranteed to be called prior to this call.  So, we can just check the MBMMAPGood flag.
 ;----------------------------------------------------------------------------------------------
 
-.flag11:        push        rax                         ; save our flags
-                test        rax,1<<11                   ; test the bit
-                jz          .NoF11                      ; jump if no
-                call        MB1GetVBE                   ; get the VBE Information
-.NoF11:         pop         rax                         ; restore the flags
+MB1GetFreeFirst:
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
+                push        rcx                     ; save rcx
+                push        rdx                     ; save rdx
+                push        rsi                     ; save rsi
+                push        rdi                     ; save rdi
 
 ;----------------------------------------------------------------------------------------------
-; test flag 10
+; quick sanity check: do we have a good mmap?
 ;----------------------------------------------------------------------------------------------
 
-.flag10:        push        rax                         ; save our flags
-                test        rax,1<<10                   ; test the bit
-                jz          .NoF10                      ; jump if no
-                call        MB1GetAPMTable              ; get the APM Table
-.NoF10:         pop         rax                         ; restore the flags
+                mov.q       rax,MBMMAPGood          ; get the address of the flag
+                cmp.b       [rax],0                 ; do we have a good mmap?
+                je          .noGood                 ; if not good, jump out
 
 ;----------------------------------------------------------------------------------------------
-; test flag 9
+; start by getting the MBI address and then the address & length of the table.
 ;----------------------------------------------------------------------------------------------
 
-.flag09:        push        rax                         ; save our flags
-                test        eax,1<<9                    ; test the bit
-                jz          .NoF09                      ; jump if No
-                call        MB1GetBootLoaderName        ; get the boot loader name
-.NoF09:         pop         rax                         ; restore the flags
+                xor.q       rbx,rbx                 ; clear the upper bits of rbx
+                mov.d       ebx,mbEBX               ; get the address of the MBI var
+                mov.d       ebx,[ebx]               ; get the structure address
 
-;----------------------------------------------------------------------------------------------
-; test flag 8
-;----------------------------------------------------------------------------------------------
-
-.flag08:        push        rax                         ; save our flags
-                test        eax,1<<8                    ; test the bit
-                jz          .NoF08                      ; jump if no
-                call        MB1GetConfig                ; get the BIOS Config Table
-.NoF08:         pop         rax                         ; restore the flags
-
-;----------------------------------------------------------------------------------------------
-; test flag 7
-;----------------------------------------------------------------------------------------------
-
-.flag07:        push        rax                         ; save our flags
-                test        eax,1<<7                    ; test the bit
-                jz          .NoF07                      ; jump if no
-                call        MB1GetDrives                ; get the system drives
-.NoF07:         pop         rax                         ; restore the flags
-
-;----------------------------------------------------------------------------------------------
-; test flag 6
-;----------------------------------------------------------------------------------------------
-
-.flag06:        push        rax                         ; save our flags
-                test        eax,1<<6                    ; test the bit
-                jz          .NoF06                      ; jump if no
-                call        MB1GetMMap                  ; get the memory map
-.NoF06          pop         rax                         ; restore the flags
-
-;----------------------------------------------------------------------------------------------
-; test flag 5
-;----------------------------------------------------------------------------------------------
-
-.flag05:        push        rax                         ; save our flags
-                test        eax,1<<5                    ; test the bit
-                jz          .NoF05                      ; jump if no
-                call        MB1GetELF                   ; get the elf symbols
-.NoF05          pop         rax                         ; restore the flags
-
-;----------------------------------------------------------------------------------------------
-; test flag 4
-;----------------------------------------------------------------------------------------------
-
-.flag04:        push        rax                         ; save our flags
-                test        eax,1<<4                    ; test the bit
-                jz          .NoF04                      ; jump if no
-                call        MB1GetAOUT                  ; get the a.out symbols
-.NoF04:         pop         rax                         ; restore the flags
-
-;----------------------------------------------------------------------------------------------
-; test flag 3
-;----------------------------------------------------------------------------------------------
-
-.flag03:        push        rax                         ; save our flags
-                test        eax,1<<3                    ; test the bit
-                jz          .NoF03                      ; jump if no
-                call        MB1GetMods                  ; get the modules loaded
-.NoF03          pop         rax                         ; restore the flags
-
-;----------------------------------------------------------------------------------------------
-; test flag 2
-;----------------------------------------------------------------------------------------------
-
-.flag02:        push        rax                         ; save flags
-                test        eax,1<<2                    ; test the bit
-                jz          .NoF02                      ; jump if no
-                call        MB1GetCmdLine               ; go get the command line
-.NoF02:         pop         rax                         ; restore the flags
-
-;----------------------------------------------------------------------------------------------
-; test flag 1
-;----------------------------------------------------------------------------------------------
-
-.flag01:        push        rax                         ; save our flags
-                test        eax,1<<1                    ; test the bit
-                jz          .NoF01                      ; jump if no
-                call        MB1GetBootDrive             ; go get the boot device
-.NoF01:         pop         rax                         ; restore the flags
-
-;----------------------------------------------------------------------------------------------
-; test flag 0
-;----------------------------------------------------------------------------------------------
-
-.flag00:        push        rax
-                test        eax,1<<0                    ; test the bit
-                jz          .NoF00                      ; jump if no
-                call        MB1GetMemLimits             ; go get the memory limits
-.NoF00:         pop         rax                         ; restore the flags
-
-;----------------------------------------------------------------------------------------------
-; End the line
-;----------------------------------------------------------------------------------------------
-
-.out:
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void LoadMB2Info(void) -- Read the MB2 data structures and load our data structures
-;----------------------------------------------------------------------------------------------
-
-LoadMB2Info:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void LoadNonMBInfo(void) -- Do the best we can to figure out what data we have and load out
-;                             data structures
-;----------------------------------------------------------------------------------------------
-
-LoadNonMBInfo:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void MB1GetMemLimits(register MBInfo *mbi) -- read and store the memory limits info.  RBX
-;                                               contains the address of the mbi struct on
-;                                               entry
-;----------------------------------------------------------------------------------------------
-
-MB1GetMemLimits:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-                push        rsi                         ; we will modify rsi
-
-                xor         rax,rax                     ; clear rax
-                mov         eax,dword [rbx+4]           ; get the mem_lower value
-                mov         rsi,qword mbiMemLower       ; get the address of the var
-                mov         dword [rsi],eax             ; save the value
-
-                xor         rax,rax                     ; clear rax
-                mov         eax,dword [rbx+8]           ; get the mem_lower value
-                mov         rsi,qword mbiMemUpper       ; get the address of the var
-                mov         dword [rsi],eax             ; save the value
-
-                mov         rsi,qword mbiMemGood        ; get the address of the var
-                add         byte [rsi],1                ; mark the data as good
-
-                pop         rsi                         ; restore rsi
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void void MB1GetBootDrive(register MBInfo *mbi) -- read the boot drive.  RBX contains the
-;                                                    address of the mbi struct on entry
-;----------------------------------------------------------------------------------------------
-
-MB1GetBootDrive:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-                push        rsi                         ; we will modify rsi
-
-                xor         rax,rax                     ; clear rax
-                mov         eax,dword [rbx+12]          ; get the mem_lower value
-                mov         rsi,qword mbiBootDevice     ; get the address of the var
-                mov         dword [rsi],eax             ; save the value
-
-                mov         rsi,qword mbiBootDrvGood    ; get the address of the var
-                add         byte [rsi],1                ; mark the data as good
-
-                pop         rsi                         ; restore rsi
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void MB1GetCmdLine(register MBInfo *mbi) -- read the kernel command line.  RBX contains the
-;                                             address of the mbi struct on entry
-;----------------------------------------------------------------------------------------------
-
-MB1GetCmdLine:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-                push        rsi                         ; we will modify rsi
-
-                xor         rax,rax                     ; clear rax
-                mov         eax,dword [rbx+16]          ; get the mem_lower value
-                mov         rsi,qword mbiCmdLine        ; get the address of the var
-                mov         qword [rsi],rax             ; save the value
-
-                mov         rsi,qword mbiCmdLnGood      ; get the address of the var
-                add         byte [rsi],1                ; mark the data as good
-
-                pop         rsi                         ; restore rsi
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void MB1GetMods(register MBInfo *mbi) -- retrieve the info about loaded modules.  RBX
-;                                          contains the address of the mbi struct on entry
-;----------------------------------------------------------------------------------------------
-
-MB1GetMods:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-                push        rcx                         ; we will modify rcx
-                push        rsi                         ; we will modify rsi
-
-                xor         rax,rax                     ; clear rax
-                mov         eax,dword [rbx+20]          ; get the mem_lower value
-                mov         rsi,qword mbiModsCnt        ; get the address of the var
-                mov         dword [rsi],eax             ; save the value
-                mov         rcx,rax                     ; save this number in the counter also
-
-                cmp         rcx,0                       ; fo we have no modules?
-                je          .none                       ; if none, jump
-                cmp         rcx,MBMAXMODS               ; do we have too many loaded modules
-                ja          .tooMany                    ; if so we have too many
-
-                mov         rsi,qword mbiModsGood       ; get the address of the var
-                add         byte [rsi],1                ; mark the data as good
-                jmp         .loadTbl                    ; go load the table
-
-.tooMany:
-                mov         rsi,qword mbiModsGood       ; get the address of the var
-                sub         byte [rsi],1                ; mark the data that we have too many
-                mov         rcx,MBMAXMODS               ; set the limit; we just suffer
-
-.loadTbl:
-                shl         rcx,2                       ; each entry has 4 elements 2^2 = 4
-                xor         rax,rax                     ; clear rax
-                mov         eax,dword [rbx+24]          ; get the address
-                mov         rsi,rax                     ; and we get the start of the address
+                mov.d       ecx,[rbx+MB1.mmapLength]; get the length of the total table
+                mov.d       ebx,[rbx+MB1.mmapAddr]  ; get the address of the first mmap entry
 
-                mov         rdi,qword mbiModsTbl        ; get the address of the table
-                cld                                     ; make sure we increment
-                rep         movsd                       ; copy the data
-
-.none:
-                pop         rsi                         ; restore rsi
-                pop         rcx                         ; restore rcx
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void MB1GetAOUT(register MBInfo *mbi) -- retrieve the info about a.out symbols table.  RBX
-;                                          contains the address of the mbi struct on entry
-;
-;                                          This function is a stub
-;----------------------------------------------------------------------------------------------
-
-MB1GetAOUT:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-
-
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void MB1GetELF(register MBInfo *mbi) -- retrieve the info about the elf symbol table.  RBX
-;                                         contains the address of the mbi struct on entry
-;
-;                                          This function is a stub
-;----------------------------------------------------------------------------------------------
-
-MB1GetELF:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-
-
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void MB1GetMMap(register MBInfo *mbi) -- retrieve the info about the memory map.  RBX
-;                                          contains the address of the mbi struct on entry
-;----------------------------------------------------------------------------------------------
-
-MB1GetMMap:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-                push        rcx                         ; we will modify rcx
-                push        rsi                         ; we will modify rsi
-                push        rdi                         ; we will modify rdi
-
-                xor         rax,rax                     ; clear rax
-                mov         eax,dword [rbx+44]          ; get the mmap length
-                mov         rsi,qword mbiMMapLen        ; get the address of the var
-                mov         dword [rsi],eax             ; save the value
-
-                mov         rcx,rax
-                cmp         rcx,0                       ; is the length 0?
-                je          .none
-
-                cmp         rcx,MBMAXMMAP               ; if the length > MBMAXMMAP?
-                ja          .tooLong                    ; jump if so
-
-                mov         rsi,qword mbiMMapGood       ; get the address of the var
-                add         byte [rsi],1                ; mark the data as good
-                jmp         .loadTable                  ; otherwise go load the table
-
-.tooLong:
-                mov         rcx,MBMAXMMAP               ; srtifically set the length
-                mov         rsi,qword mbiMMapGood       ; get the address of the var
-                sub         byte [rsi],1                ; mark the data as incomplete
-
-.loadTable:
-                xor         rax,rax                     ; clear rax
-                mov         eax,dword [rbx+48]          ; get the address
-                mov         rsi,rax                     ; and we get the start of the address
-                mov         rdi,qword mbiMMap           ; get the address of the table
-
-                rep         movsd                       ; copy the data
-
-.none:
-                pop         rdi                         ; restore rdi
-                pop         rsi                         ; restore rsi
-                pop         rcx                         ; restore rcx
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void MB1GetDrives(register MBInfo *mbi) -- retrieve the info about system drives.  RBX
-;                                            contains the address of the mbi struct on entry
-;
-;                                            This function is a stub
-;----------------------------------------------------------------------------------------------
-
-MB1GetDrives:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-
-
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void MB1GetConfig(register MBInfo *mbi) -- retrieve the info about the BIOS config table.
-;                                            RBX contains the address of the mbi struct on
-;                                            entry
-;
-;                                            This function is a stub
-;----------------------------------------------------------------------------------------------
-
-MB1GetConfig:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-
-
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void MB1GetBootLoaderName(register MBInfo *mbi) -- retrieve the boot loader name.  RBX
-;                                                    contains the address of the mbi struct on
-;                                                    entry
-;
-;                                                    This function is a stub
-;----------------------------------------------------------------------------------------------
-
-MB1GetBootLoaderName:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-
-
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void MB1GetAPMTable(register MBInfo *mbi) -- retrieve the info about APM.  RBX contains the
-;                                              address of the mbi struct on entry
-;
-;                                              This function is a stub
-;----------------------------------------------------------------------------------------------
-
-MB1GetAPMTable:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-
-
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
-;----------------------------------------------------------------------------------------------
-; void MB1GetVBE(register MBInfo *mbi) -- retrieve the info about VBE.  RBX contains the
-;                                         address of the mbi struct on entry
-;
-;                                         This function is a stub
-;----------------------------------------------------------------------------------------------
-
-MB1GetVBE:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-
-
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
-                ret
-
-;==============================================================================================
-
 ;----------------------------------------------------------------------------------------------
-; void ReportResults(void) -- Report the results of scanning the Multiboot information to the
-;                             screen.
+; Now we look for the first free entry in the tables.  We might not get one (unlikely), but
+; check for going past the end of the table anyway.
 ;----------------------------------------------------------------------------------------------
-
-ReportResults:
-                push        rbp                         ; create a frame
-                mov         rbp,rsp
-                push        rbx                         ; we will modify rbx
-                push        rcx                         ; we will modify rcx
-                push        rdx                         ; we will modify rdx
-                push        rsi                         ; we will modify rsi
-                push        rdi                         ; we will modify rdi
-                push        r11                         ; we will modify r11
-                push        r12                         ; we will modify r12
-                push        r13                         ; we will modify r13
-
-                mov         rbx,qword mbiMMapGood       ; get the address of the variable
-                xor         rax,rax                     ; clear
-                mov         al,byte [rbx]               ; get the variable
-                cmp         al,0x00                     ; do we even have a good map?
-                je          .noMMap                     ; if not, exit
-                cmp         al,0xff                     ; do we have a memory limit problem?
-                jne         .print                      ; if we are good, go print
-
-                push        qword 0x0c                  ; we want red on black
-                call        TextSetAttr                 ; Set the attribute
-
-                mov         rbx,qword MMapError         ; get the address of hte string
-                push        rbx                         ; push it on the stack
-                call        TextPutString               ; print the error
-                add         rsp,8                       ; clean up the stack
 
-                mov         qword [rsp],0x0f            ; set back to normal attr
-                call        TextSetAttr                 ; set the attrubite
-                add         rsp,8                       ; clean the stack
+.loop:          cmp.q       rcx,0                   ; have we used up all our bytes?
+                jle         .noGood                 ; if so, we can exit (note -- signed cmp)
 
-.print:
-                mov         rsi,qword mbiMMap           ; get the start of the table
-                xor         rcx,rcx                     ; clear out a byte counter
+                xor.q       rdx,rdx                 ; clear rdx
+                mov.d       edx,[rbx+MB1MMap.size]  ; get the size of the mmap entry
+                cmp.q       rdx,0                   ; is the size of the entry 0?
+                je          .noGood                 ; if so, let's assume we can exit
 
-                mov         rbx,qword mbiMMapLen        ; get the table length field
-                xor         rdx,rdx                     ; clear rdx
-                mov         edx,dword [rbx]             ; get the table length
+                add.q       rdx,4                   ; be sure to include the size field
 
-.loop:
-                cmp         rcx,rdx                     ; compare the 2 lengths
-                jae         .loopOut                    ; is we have exhausted all our data
-
-;----------------------------------------------------------------------------------------------
-; set/reset out pointer
-;----------------------------------------------------------------------------------------------
-
-                mov         rdi,qword [rsi+4]                   ; get the base address
-
 ;----------------------------------------------------------------------------------------------
-; Get the base address and write it to the screen (with the hyphen)
+; do we have a free block?
 ;----------------------------------------------------------------------------------------------
-
-                push        rsi                         ; this time we need to save a bunch
-                push        rbx
-                push        rcx
-                push        rdx
 
-                push        rdi                         ; push the hex number
-                mov         r11,rdi                     ; save the value for later
-                call        TextPutHexQWord             ; write the qword
+                mov.d       edi,[rbx+MB1MMap.type]  ; get the type
+                cmp.d       edi,1                   ; is this a free block?
+                jne         .iter                   ; if not, get the next block
 
-                mov         rdi,qword mmapLen
-                mov         qword [rsp],rdi             ; put the hyphen out
-                call        TextPutString               ; and write it
-                add         rsp,8                       ; clean up the parm
-
-                pop         rdx                         ; get out values back
-                pop         rcx
-                pop         rbx
-                pop         rsi
-
 ;----------------------------------------------------------------------------------------------
-; Get the length and write it to the screen (with the " of type " string)
+; At this point, we have our free block to return.  We need to calculate the ending address
+; and return the pointer to the structure.
 ;----------------------------------------------------------------------------------------------
-
-                mov         rdi,qword [rsi+12]          ; get the length
-
-                push        rsi                         ; this time we need to save a bunch
-                push        rbx
-                push        rcx
-                push        rdx
-
-                push        rdi                         ; push the hex number
-                mov         r12,rdi                     ; save the value for later
-                call        TextPutHexQWord             ; write the qword
 
-                mov         rbx,qword mmapType          ; get the string
-                mov         qword [rsp],rbx             ; replace it on the stack
-                call        TextPutString               ; write the string
-                add         rsp,8                       ; clean up the parm
+                mov.q       rsi,mbFreeMem           ; get the address of our structure
+                mov.q       rax,[rbx+MB1MMap.baseAddr]  ; get the base address
+                mov.q       [rsi+FreeMem.str],rax   ; and store it in the field
 
-                pop         rdx                         ; get out values back
-                pop         rcx
-                pop         rbx
-                pop         rsi
+                mov.q       rax,[rbx+MB1MMap.length]; get the block length
+                mov.q       [rsi+FreeMem.size],rax  ; set the block size
 
-;----------------------------------------------------------------------------------------------
-; Finally, get the type and write it to the screen (with the <CR>)
-;----------------------------------------------------------------------------------------------
-
-                xor         rdi,rdi                     ; clear rdi
-                mov         edi,dword [rsi+20]          ; get the type
+                add.q       rbx,rdx                 ; move to the next block
+                sub.q       rcx,rdx                 ; sub the byte count
 
-                push        rsi                         ; this time we need to save a bunch
-                push        rbx
-                push        rcx
-                push        rdx
+                mov.q       [rsi+FreeMem.addr],rbx  ; save the current pointer
+                mov.q       [rsi+FreeMem.len],rcx   ; save the current length
 
-                push        rdi                         ; push the hex number
-                mov         r13,rdi                     ; save this for later also
-                call        TextPutHexByte              ; mask it down to a byte
+                mov.q       rax,rsi                 ; finally, set our return value
 
-                mov         qword [rsp],13              ; put a <CR>
-                call        TextPutChar                 ; and write it
-                pop         rdi                         ; this time we need the value back
+                jmp         .out                    ; go to the exit code
 
-
 ;----------------------------------------------------------------------------------------------
-; If the type is '1', then we need to log the free memory
+; check the next entry
 ;----------------------------------------------------------------------------------------------
-
-                cmp         r13,0x0000000000000001      ; is it type 1?
-                jne         .iter                       ; if not, we iterate
-
-                push        r12                         ; push the saved length
-                push        r11                         ; push the saved start
-                call        PMMMarkBlockFree            ; prepare the free memory bitmap
-                add         rsp,16                      ; clean up the stack
 
 .iter:
-                pop         rdx                         ; get out values back
-                pop         rcx
-                pop         rbx
-                pop         rsi
+                add.q       rbx,rdx                 ; move the the next entry
+                sub.q       rcx,rdx                 ; remove the bytes from the remaining size
+                jmp         .loop                   ; loop again
 
 ;----------------------------------------------------------------------------------------------
-; Now, increment our size position and loop
+; we do not have a good free entry in the mmap table.  mark it so and exit
 ;----------------------------------------------------------------------------------------------
 
-                xor         rax,rax                     ; clear rax
-                mov         eax,dword [rsi]             ; get the block size
-                add         rax,4                       ; need to sdjust for the size
-                add         rcx,rax                     ; add the number of bytes
-                add         rsi,rax                     ; move to the next block
-                jmp         .loop                       ; and loop
+.noGood:        mov.q       rax,mbFreeMem           ; get the address of the structure
+                mov.q       [rax+FreeMem.str],0     ; set the start address to 0
+                mov.q       [rax+FreeMem.size],0    ; set the block size to 0
+                mov.q       [rax+FreeMem.addr],0    ; set the current entry addr to 0
+                mov.q       [rax+FreeMem.len],0     ; set the remaining length to 0
+                xor.q       rax,rax                 ; set the return address to NULL
 
-
-.loopOut:
-                push        qword 13                    ; push a <CR>
-                call        TextPutChar                 ; and write it
-                add         rsp,8                       ; clean up the stack
-
-                jmp         .out                        ; leave the subroutine
-
-.noMMap:
-                push        qword 0x0c                  ; we want red on black
-                call        TextSetAttr                 ; Set the attribute
-
-                mov         rbx,qword NoMMap            ; get the address of hte string
-                push        rbx                         ; push it on the stack
-                call        TextPutString               ; print the error
-                add         rsp,8                       ; clean up the stack
-
-                mov         qword [rsp],0x0f            ; set back to normal attr
-                call        TextSetAttr                 ; set the attrubite
-                add         rsp,8                       ; clean the stack
+;----------------------------------------------------------------------------------------------
+; clean up and exit
+;----------------------------------------------------------------------------------------------
 
 .out:
-                pop         r13                         ; restore r13
-                pop         r12                         ; restore r12
-                pop         r11                         ; restore r11
-                pop         rdi                         ; restore rdi
-                pop         rsi                         ; restore rsi
-                pop         rdx                         ; restore rdx
-                pop         rcx                         ; restore rcx
-                pop         rbx                         ; restore rbx
-                pop         rbp                         ; restore caller's frame
+                pop         rdi                     ; restore rdi
+                pop         rsi                     ; restore rsi
+                pop         rdx                     ; restore rdx
+                pop         rcx                     ; restore rcx
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; qword MB1GetFreeNext(void) -- For the MB1 structures, return the next free block of memory
+;                               by setting up the structures in mbFreeMem and then return the
+;                               pointer to this structure.  If nothing is free, then set the
+;                               structures to 0 and return 0.  Keep in mind that this is
+;                               highly unlikely if we have a good memory map.
+;
+; We have already done all the pre-checking for this when we call GetMemLimit(), which is
+; guaranteed to be called prior to this call.  So, we can just check the MBMMAPGood flag.
+;----------------------------------------------------------------------------------------------
+
+MB1GetFreeNext:
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
+                push        rcx                     ; save rcx
+                push        rdx                     ; save rdx
+                push        rsi                     ; save rsi
+                push        rdi                     ; save rdi
+
+;----------------------------------------------------------------------------------------------
+; quick sanity check: do we have a good mmap?
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rax,MBMMAPGood          ; get the address of the flag
+                cmp.b       [rax],0                 ; do we have a good mmap?
+                je          .noGood                 ; if not good, jump out
+
+;----------------------------------------------------------------------------------------------
+; Get the state from the other fields and prepare to continue searching
+;----------------------------------------------------------------------------------------------
+
+                xor.q       rbx,rbx                 ; clear upper rbx bits
+                xor.q       rcx,rcx                 ; clear upper rcx bits
+
+                mov.q       rax,mbFreeMem           ; get the address of our structure
+                mov.d       ebx,[rax+FreeMem.addr]  ; get the address of the next entry
+                mov.d       ecx,[rax+FreeMem.len]   ; get the current remaining length
+
+;----------------------------------------------------------------------------------------------
+; Now we look for the first free entry in the tables.  We might not get one (unlikely), but
+; check for going past the end of the table anyway.
+;----------------------------------------------------------------------------------------------
+
+.loop:          cmp.q       rcx,0                   ; have we used up all our bytes?
+                jle         .noGood                 ; if so, we can exit (note -- signed cmp)
+
+                xor.q       rdx,rdx                 ; clear rdx
+                mov.d       edx,[rbx+MB1MMap.size]  ; get the size of the mmap entry
+                cmp.q       rdx,0                   ; is the size of the entry 0?
+                je          .noGood                 ; if so, let's assume we can exit
+
+                add.q       rdx,4                   ; be sure to include the size field
+
+;----------------------------------------------------------------------------------------------
+; do we have a free block?
+;----------------------------------------------------------------------------------------------
+
+                mov.d       edi,[rbx+MB1MMap.type]  ; get the type
+                cmp.d       edi,1                   ; is this a free block?
+                jne         .iter                   ; if not, get the next block
+
+;----------------------------------------------------------------------------------------------
+; At this point, we have our free block to return.  We need to calculate the ending address
+; and return the pointer to the structure.
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rsi,mbFreeMem           ; get the address of our structure
+                mov.q       rax,[rbx+MB1MMap.baseAddr]  ; get the base address
+                mov.q       [rsi+FreeMem.str],rax   ; and store it in the field
+
+                mov.q       rax,[rbx+MB1MMap.length]; get the block length
+                mov.q       [rsi+FreeMem.size],rax  ; and add it to the blocks size field
+
+                add.q       rbx,rdx                 ; move to the next block
+                sub.q       rcx,rdx                 ; sub the byte count
+
+                mov.q       [rsi+FreeMem.addr],rbx  ; save the current pointer
+                mov.q       [rsi+FreeMem.len],rcx   ; save the current length
+
+                mov.q       rax,rsi                 ; finally, set our return value
+
+                jmp         .out                    ; go to the exit code
+
+;----------------------------------------------------------------------------------------------
+; check the next entry
+;----------------------------------------------------------------------------------------------
+
+.iter:
+                add.q       rbx,rdx                 ; move the the next entry
+                sub.q       rcx,rdx                 ; remove the bytes from the remaining size
+                jmp         .loop                   ; loop again
+
+;----------------------------------------------------------------------------------------------
+; we do not have a good free entry in the mmap table.  mark it so and exit
+;----------------------------------------------------------------------------------------------
+
+.noGood:        mov.q       rax,mbFreeMem           ; get the address of the structure
+                mov.q       [rax+FreeMem.str],0     ; set the start address to 0
+                mov.q       [rax+FreeMem.size],0    ; set the block size to 0
+                mov.q       [rax+FreeMem.addr],0    ; set the current entry addr to 0
+                mov.q       [rax+FreeMem.len],0     ; set the remaining length to 0
+                xor.q       rax,rax                 ; set the return address to NULL
+
+;----------------------------------------------------------------------------------------------
+; clean up and exit
+;----------------------------------------------------------------------------------------------
+
+.out:
+                pop         rdi                     ; restore rdi
+                pop         rsi                     ; restore rsi
+                pop         rdx                     ; restore rdx
+                pop         rcx                     ; restore rcx
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; qword FreeSetNULL(void) -- Sets the contents of the structure to NULL and returns NULL.
+;----------------------------------------------------------------------------------------------
+
+FreeSetNULL:
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
+
+                xor.q       rax,rax                 ; clear rax
+                mov.q       rbx,mbFreeMem.str       ; get the address of the struct member
+                mov.q       [rbx],rax               ; store the NULL there
+
+                mov.q       rbx,mbFreeMem.end       ; get the address of the struct member
+                mov.q       [rbx],rax               ; store the NULL there
+
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; qword GetMemLimit(void) -- Get the memory limit reported to us by the boot loader.
+;----------------------------------------------------------------------------------------------
+
+                global      GetMemLimit
+
+GetMemLimit:
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
+
+                mov.q       rax,MBType              ; get the address of the MBType var
+                mov.q       rax,[rax]               ; now get its contents
+                shl.q       rax,3                   ; convert to qwords (by 8)
+
+                mov.q       rbx,_GetMemLimit        ; get the offset into the address array
+                mov.q       rax,[rbx+rax]           ; get the address of the real function
+                call        rax                     ; this is a far call
+
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; qword OthGetMemLimit(void) -- Get the memory limit when loaded by non-MB compliant loader
+;----------------------------------------------------------------------------------------------
+
+OthGetMemLimit:
+                mov.q       rax,DFT_MEM             ; assume 4GB
+                ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; qword MB1GetMemLimit(void) -- Read through the MB1 memory map tables to pull out the highest
+;                               memory block available.
+;----------------------------------------------------------------------------------------------
+
+MB1GetMemLimit:
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
+                push        rcx                     ; save rcx
+                push        rdx                     ; save rdx
+                push        rsi                     ; save rsi
+                push        rdi                     ; save rdi
+
+;----------------------------------------------------------------------------------------------
+; First, do we have a good address?
+;----------------------------------------------------------------------------------------------
+
+                xor.q       rbx,rbx                 ; clear rax
+                mov.q       rax,mbEBX               ; get the address of the saved pointer
+                mov.d       ebx,[rax]               ; get the address of the MBInfo Struct
+
+                cmp.q       rbx,0                   ; is the address NULL?
+                je          .noGood                 ; if null, return our default
+
+;----------------------------------------------------------------------------------------------
+; Now, is the flag set?
+;----------------------------------------------------------------------------------------------
+
+                mov.d       eax,[rbx+MB1.flags]     ; get the flags dword
+                test.d      eax,MB1_MMAP_FLAG       ; test if the flag is good
+                jz          .noGood                 ; not set, return our default
+
+;----------------------------------------------------------------------------------------------
+; Finally, make sure the length of the memory map is > 0
+;----------------------------------------------------------------------------------------------
+
+                xor.q       rcx,rcx                 ; clear rcx
+                mov.d       ecx,[rbx+MB1.mmapLength]; get the length of the memory map
+                cmp.d       ecx,0                   ; is the length 0?
+                je          .noGood                 ; if 0, we return our default mem size
+
+;----------------------------------------------------------------------------------------------
+; If we have reached this point in the code, we know we have a good memory map.  We need to
+; loop through all the map entries and for each one that is marked "free", we need to calculate
+; the ending address (start + size).  If that result is greater than the pervious ending
+; address, then we need to set our new ending address and check the next block.  In the end,
+; we will return the highest block's ending address and the memory limit for this system.
+; Note that the blocks are not guaranteed to be in order.
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rsi,MBMMAPGood          ; get the address of the good flag
+                mov.b       [rsi],1                 ; set it to be a good mmap
+
+                xor.q       rsi,rsi                 ; clear rsi
+                mov.d       esi,[rbx+MB1.mmapAddr]  ; get the address of the memory map
+                cmp.q       rsi,0                   ; check just in case...  no surprises
+                je          .noGood                 ; if it is 0, return our default mem size
+
+                xor         rax,rax                 ; start with a return value of 0
+
+;----------------------------------------------------------------------------------------------
+; first we will check to see if we have overrun out length.
+;----------------------------------------------------------------------------------------------
+
+.loop:          cmp.q       rcx,0                   ; have we used up all our bytes?
+                jle         .out                    ; if so, we can exit (note -- signed cmp)
+
+                xor.q       rdx,rdx                 ; clear rdx
+                mov.d       edx,[rsi+MB1MMap.size]  ; get the size of the mmap entry
+                cmp.q       rdx,0                   ; is the size of the entry 0?
+                je          .out                    ; if so, let's assume we can exit
+
+                add.q       rdx,4                   ; be sure to include the size field
+
+;----------------------------------------------------------------------------------------------
+; do we have a free block?
+;----------------------------------------------------------------------------------------------
+
+                mov.d       edi,[rsi+MB1MMap.type]  ; get the type
+                cmp.d       edi,1                   ; is this a free block?
+                jne         .iter                   ; if not, get the next block
+
+;----------------------------------------------------------------------------------------------
+; calculate the ending address
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rdi,[rsi+MB1MMap.baseAddr]  ; get the base address
+                mov.q       rbx,[rsi+MB1MMap.length]    ; get the block length
+                add.q       rdi,rbx                 ; add them together to get the ending addr
+
+                cmp.q       rdi,rax                 ; is the new ending address > the prev one
+                jle         .iter                   ; if not, check the next block
+
+;----------------------------------------------------------------------------------------------
+; Update the new ending address
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rax,rdi                 ; set the new return value
+
+.iter:
+                add.q       rsi,rdx                 ; move the the next entry
+                sub.q       rcx,rdx                 ; remove the bytes from the remaining size
+                jmp         .loop                   ; loop again
+
+;----------------------------------------------------------------------------------------------
+; There is some issue and we cannot get our memory map; assume 4GB
+;----------------------------------------------------------------------------------------------
+
+.noGood:
+                mov.q       rax,DFT_MEM             ; assume 4GB
+
+;----------------------------------------------------------------------------------------------
+; clean up and exit
+;----------------------------------------------------------------------------------------------
+
+.out:
+                pop         rdi                     ; restore rdi
+                pop         rsi                     ; restore rsi
+                pop         rdx                     ; restore rdx
+                pop         rcx                     ; restore rcx
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; qword MB2GetMemLimit(void) -- Read through the MB2 memory map tables to pull out the highest
+;                               memory block available.
+;----------------------------------------------------------------------------------------------
+
+MB2GetMemLimit:
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+
+                mov.q       rax,DFT_MEM             ; assume 4GB
+
+                pop         rbp                     ; restore caller's frame
                 ret
 
 ;==============================================================================================

@@ -39,6 +39,26 @@
 %define         mov.d       mov dword
 %define         mov.q       mov qword
 
+%define         not.b       not byte
+%define         not.w       not word
+%define         not.d       not dword
+%define         not.q       not qword
+
+%define         or.b        or byte
+%define         or.w        or word
+%define         or.d        or dword
+%define         or.q        or qword
+
+%define         shl.b       shl byte
+%define         shl.w       shl word
+%define         shl.d       shl dword
+%define         shl.q       shl qword
+
+%define         shr.b       shr byte
+%define         shr.w       shr word
+%define         shr.d       shr dword
+%define         shr.q       shr qword
+
 %define         sub.b       sub byte
 %define         sub.w       sub word
 %define         sub.d       sub dword
@@ -66,12 +86,16 @@
                 extern      bootEnd
                 extern      bssEnd
                 extern      kernelStart
+                extern      kernelEnd
 
 ;----------------------------------------------------------------------------------------------
 ; -- the following symbols are found in loader.s
 ;----------------------------------------------------------------------------------------------
 
 VIRT_BASE       equ         0xffffffff80000000
+
+STACK_LOC       equ         0xfffff00200000000
+STACK_SIZE      equ         0x0000000000004000              ; 16K
 
 %ifndef __LOADER_S__
                 extern      mbEAX
@@ -83,6 +107,7 @@ VIRT_BASE       equ         0xffffffff80000000
 ;----------------------------------------------------------------------------------------------
 
 %ifndef __PAGETABLES_S__
+                extern      PagingInit
                 extern      PML4Table
                 extern      PDPT
                 extern      PD
@@ -108,8 +133,18 @@ VIRT_BASE       equ         0xffffffff80000000
 ; -- the following symbols are found in mbcheck.s
 ;----------------------------------------------------------------------------------------------
 
+struc FreeMem
+    .str        resq        1                       ; starting address of the block
+    .size       resq        1                       ; ending address of the block (not length)
+    .addr       resd        1                       ; the address of the current entry
+    .len        resd        1                       ; the remaining length of the mmap
+endstruc
+
 %ifndef __MBCHECK_S__
                 extern      CheckMB
+                extern      GetMemLimit
+                extern      GetFreeFirst
+                extern      GetFreeNext
 %endif
 
 ;----------------------------------------------------------------------------------------------
@@ -118,13 +153,12 @@ VIRT_BASE       equ         0xffffffff80000000
 
 %ifndef __PHYSMM_S__
                 extern      PMMInit
-                extern      PMMMarkBlockFree
-                extern      PMMMarkBlockUsed
+                extern      PMMInit2
+                extern      MarkBlockFree
+                extern      MarkBlockUsed
+                extern      AllocFrame
+                extern      AllocFrameLimit
 %endif
-
-;----------------------------------------------------------------------------------------------
-; -- the following symbols are found in virtmm.s
-;----------------------------------------------------------------------------------------------
 
 ;----------------------------------------------------------------------------------------------
 ; -- the following symbols are found in kheap.s
@@ -137,19 +171,16 @@ VIRT_BASE       equ         0xffffffff80000000
 %endif
 
 ;----------------------------------------------------------------------------------------------
-; These flags are used to identify the type of page in the paging tables.  These flags are
-; located at bits 11:9, so each of these flags needs to be adjusted (. & 0x7) << 9 to write to
-; the page table entry and then (. >> 9) & 0x7 when read from the page table entry.
+; -- the following symbols are found in virtmm.s
 ;----------------------------------------------------------------------------------------------
-VMM_NORMAL      equ         0x0
-VMM_SHARED      equ         0x1
 
-VMM_SUCCESS     equ         0x00000000      ; no errors; no warnings
-VMM_WARN_ALIGN  equ         0x00000001      ; the address is not page-aligned; aligned it
-VMM_WARN_SHARED equ         0x00000002      ; the address belongs to shared memory
-VMM_ERR_NOMAP   equ         0xffffffff      ; the address is not mapped
+VMM_SUCCESS     equ         0x0000000000000000
+VMM_WARN_ALIGN  equ         0x0000000000000001
+VMM_WARN_MAPPED equ         0x0000000000000002
+VMM_ERR_NOMEM   equ         0xffffffffffffffff
 
 %ifndef __VIRTMM_S__
                 extern      VMMInit
-                extern      VMMUnmapPage
+                extern      VMMAlloc
+                extern      VMMFree
 %endif
