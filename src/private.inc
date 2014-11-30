@@ -158,6 +158,7 @@ endstruc
                 extern      MarkBlockUsed
                 extern      AllocFrame
                 extern      AllocFrameLimit
+                extern      FreeFrame
 %endif
 
 ;----------------------------------------------------------------------------------------------
@@ -177,6 +178,7 @@ endstruc
 VMM_SUCCESS     equ         0x0000000000000000
 VMM_WARN_ALIGN  equ         0x0000000000000001
 VMM_WARN_MAPPED equ         0x0000000000000002
+VMM_WARN_NOTMAPPED equ      0x0000000000000003
 VMM_ERR_NOMEM   equ         0xffffffffffffffff
 
 %ifndef __VIRTMM_S__

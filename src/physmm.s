@@ -84,6 +84,7 @@
 ;                            management function.  Included in this is to restructure how the
 ;                            pmm data is maintained into a structure on the .bss segment.  I
 ;                            will also be adding a "panic" screen when there is an error.
+; 2014/11/29  #202     ADCL  Completed the mapping and management of physical memory above 32GB
 ;
 ;==============================================================================================
 
@@ -152,6 +153,9 @@ errFBitBound    db          '               In SetBitFree, block start not in ma
 errUBitAlign    db          '                In SetBitUsed, starting address alignment bad',0
 errUBitBound    db          '               In SetBitUsed, block start not in managed bounds',0
 
+errInit2        db          '           In PMMInit2, Unrecognized state for initialization > 32GB',0
+errInit2Nomem   db          '           In PMMInit2, Unable to allocate memory for bitmap > 32GB',0
+
 ;==============================================================================================
 ; this .text section contains the code to implement the Physical Memory Management layer
 ;==============================================================================================
@@ -190,7 +194,6 @@ PMMInit:
                 push        rsi                     ; save rsi
                 push        rdi                     ; save rdi
                 push        r11                     ; save r11
-
 
 ;----------------------------------------------------------------------------------------------
 ; set out pointer to the pmm structure
@@ -234,7 +237,7 @@ PMMInit:
                 mov.q       rcx,rax                 ; move the frame count to a work reg
                 shr.q       rcx,15                  ; get the number of frames
 
-                test.q      rax,0x0000000000007fff  ; do we have a partial frame?
+                test.q      rax,0x0000000000007fff  ; do we have a partial frame leftover?
                 jz          .calcFrames             ; if no partial frame, skip next part
 
                 inc         rcx                     ; we have a partial frame, inc count
@@ -353,7 +356,10 @@ PMMInit:
 ; now we just need to mark the block as free
 ;----------------------------------------------------------------------------------------------
 
-.free:          push        rcx                     ; push the size
+.free:          and.q       rbx,~0x0fff             ; align the starting address
+                and.q       rcx,~0x0fff             ; align the block size
+
+                push        rcx                     ; push the size
                 push        rbx                     ; push the starting address
                 call        MarkBlockFree           ; free the block
                 add.q       rsp,16                  ; clean up the stack
@@ -411,11 +417,292 @@ PMMInit:
 ;==============================================================================================
 
 ;----------------------------------------------------------------------------------------------
-; This is a stub function to continue initializing the memory > 32GB.
+; void PMMInit2(void) -- When we initialized the physical memory manager in PMMInit(), we only
+;                        established memory for a limit of 32GB of physical memory.  It is
+;                        possible that the computer could have much more than this -- up to
+;                        256TB of physical memory.  We want to be able to manage and make use
+;                        of all of this memory.  PMMInit2 will extend the initialization of the
+;                        PMM sturcture to include all available physical memory.
+;
+; This function is called regardless of the memory installed on the system.  When this function
+; is called, there are 3 mutually exclusive conditions that could be met and each has its own
+; actions to be taken:
+; 1)  The value in pmm.sysFrames is the same as the value in pmm.curFrames and the value in
+;     both these fields is == _32GB.  This means we have exactly 32GB physical memory installed
+;     on the system and the highest address reported by multiboot is exactly 32GB.  In this
+;     case, our initialization is complete and we can exit.  Note that this is an unlikely
+;     scenario.
+; 2)  The value in pmm.sysFrames is the same as the value in pmm.curFrames and the value in
+;     both these fields is <> _32GB.  This means we have less than 32GB physical memory
+;     installed on the system.  In this case, we need to clean up the extra frames allocated to
+;     the bitmap > pmm.bmFrames and release these back to the PMM.
+; 3)  The value in pmm.sysFrames is > 32GB.  This means we have more than 32GB memory installed
+;     on the system and will need to extend the initialization of the additional memory.  The
+;     logic for this extended inisialization will look very similar to PMMInit(), except that
+;     we will operate on the portions above _32GB rather than below _32GB.  Also, we now have
+;     the benefit of the VMM being online, so the actual code should be simplified a bit.
+;
+; Anything other than one of these 3 specific scenarios will generate an error and stop the
+; system.
+;
+; Finally, it is important to recognize that we are "rounding up" to 32GB.  One frame of bitmap
+; is able to keep track of 128MB of physical memory.  So, a system with physical memory in the
+; range from 32GB-(128MB-4KB) to 32GB is all considered to have the same amount of memory:
+; 32GB.  This is because it takes the same number of frames to manage this memory.
 ;----------------------------------------------------------------------------------------------
+
                 global      PMMInit2
 
-PMMInit2:       ret
+PMMInit2:
+                push        rbp                     ; save caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
+                push        rcx                     ; save rcx
+                push        rsi                     ; save rsi
+                push        r9                      ; save r9
+                push        r10                     ; save r10
+                push        r11                     ; save r11
+
+                mov.q       r11,pmm                 ; get the memory management struct addr
+
+;----------------------------------------------------------------------------------------------
+; First, we need to determine which state we are in.  State #1 is not the most likely, so we
+; will check that last.  State #3 is simpler than state #2, so we will check that first.
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rbx,[r11+PMM.curFrames] ; get the current number of frames
+                shl.q       rbx,12                  ; convert frames to address length
+
+                mov.q       rcx,[r11+PMM.sysFrames] ; get the number of frames
+                shl.q       rcx,12                  ; convert frames to address length
+
+                mov.q       rax,_32GB               ; get the 32GB constant
+                cmp.q       rcx,rax                 ; how we relate to 32GB
+                ja          .state3                 ; more than 32GB, we have state 3
+                jb          .s2chk                  ; if less than 32GB, double check state 2
+
+;----------------------------------------------------------------------------------------------
+; here we know pmm.sysFrames holds 32GB exactly.  double check pmm.curFrames to make sure we
+; have state #1.
+;----------------------------------------------------------------------------------------------
+
+                cmp.q       rbx,rax                 ; how are we comparing against 32GB
+                je          .state1                 ; pretty sure we have state 1 now
+                jmp         .error                  ; we know we have a problem
+
+;----------------------------------------------------------------------------------------------
+; double check that we have state2.
+;----------------------------------------------------------------------------------------------
+
+.s2chk:         cmp.q       rbx,rax                 ; how are we comparing against 32GB
+                jne         .state2                 ; pretty sure we have state 2 now
+                jmp         .error                  ; we know we have a problem
+
+;----------------------------------------------------------------------------------------------
+; we have an error, so let's report it
+;----------------------------------------------------------------------------------------------
+
+.error:         mov.q       rax,errInit2            ; get the error message address
+                push        rax                     ; push it on the stack
+                call        pmmError                ; display the error screen
+
+;----------------------------------------------------------------------------------------------
+; we think we are working with state1: exactly 32GB memory; the last check is to make sure
+; pmm.sysFrames == pmm.curFrames.
+;----------------------------------------------------------------------------------------------
+
+.state1:        cmp.q       rbx,rcx                 ; compare pmm.sysFrames with pmm.curFrames
+                jne         .error                  ; if not the same, we have an error
+
+;----------------------------------------------------------------------------------------------
+; from here it is trivial...  we are fully initialized and fully cleaned up.  Just exit!
+;----------------------------------------------------------------------------------------------
+
+                jmp         .out                    ; we are done; exit
+
+;----------------------------------------------------------------------------------------------
+; we think we are working with state2: < 32GB memory; the last check is to make sure
+; pmm.sysFrames == pmm.curFrames.
+;----------------------------------------------------------------------------------------------
+
+.state2:        cmp.q       rbx,rcx                 ; compare pmm.sysFrames with pmm.curFrames
+                jne         .error                  ; if not the same, we have an error
+
+;----------------------------------------------------------------------------------------------
+; At this point, we know that we have less than 32GB of memory and we will be able to release
+; at least 1 frame of memory.  Actually, we will unmap the page and free the frame until since
+; we will only release the identity mapping we did in lower memory.
+;
+; So, how do we know where to freeing these pages?  Well, that's what pmm.bmFrames is for.
+; pmm.bmFrames is the first frame that we can free (since the frames are 0-based).  Finally,
+; since there are 256 frames in the space we allocated, it is very easy to figure out exactly
+; what we need to deallocate.
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rbx,[r11+PMM.bmFrames]  ; get the number of frames
+
+                mov.q       rcx,256                 ; set the maximum number of pages possible
+                sub.q       rcx,rbx                 ; get the number of pages we want to clear
+
+                shl.q       rbx,12                  ; convert the frames to addresses
+
+                mov.q       rsi,[r11+PMM.bitmap]    ; get the bitmap address
+                add.q       rsi,rbx                 ; get the address of the first page to free
+
+;----------------------------------------------------------------------------------------------
+; now we have everything prepared and it's just a matter of calling the vmm function to free
+; the memory
+;----------------------------------------------------------------------------------------------
+
+                push        rcx                     ; push the number of pages to free
+                push        rsi                     ; push the starting frame to free
+                call        VMMFree                 ; go and free the memory
+                add.q       rsp,16                  ; clean up the stack
+
+                jmp         .out                    ; that's it!  we are done; exit
+
+;----------------------------------------------------------------------------------------------
+; we are working with state3: > 32GB memory; there is nothing else to check.
+;
+; So, the first thing we need to do is to recalculate the bmFrames and other fields we will
+; ultimately be updating in the pmm structure.  Keep in mind that since the pmm is fully
+; operational with 32GB memory, we cannot update these fields in the structure with the full
+; new values until everything has been properly initialized.  As a result, we need to keep the
+; new values in work fields to be sure we don't create a problem.
+;----------------------------------------------------------------------------------------------
+
+.state3:
+                mov.q       r9,[r11+PMM.sysFrames]  ; get the total number of frames we manage
+                mov.q       rax,Frames32GB          ; get the constant val of 32GB frame count
+                sub.q       r9,rcx                  ; r9 holds the new value for pmm.curFrames
+
+                mov.q       r10,r9                  ; copy the curFrames into r10
+                shr.q       r10,15                  ; convert curFrames into bmFrames
+
+                test.q      r9,0x0000000000007fff   ; do we have a partial frame leftover?
+                jz          .calcFrames             ; if not, we can skip the extra frame
+
+                inc         r10                     ; add 1 extra frame to manage the partial
+
+.calcFrames:    sub.q       r10,256                 ; we already allocated 256 frames...
+
+                mov.q       rsi,[r11+PMM.bitmap]    ; get the bitmap address
+                add.q       rsi,0x100000            ; move past the first 1MB, already mapped
+
+;----------------------------------------------------------------------------------------------
+; Now we need to ask the VMM to map the additional pages.  This is a significant step since the
+; VMM is going to ask the PMM for additional memory and the PMM is not yet fully initialized.
+; Going through some quick calculations and fact checking, we know we have more than 32GB of
+; memory on the system to manage.  We know we can have up to 256TB of memory physically
+; installed on the system.  If we take 256TB and shift right by 12 bits to convert this to
+; physical frames and then shift right again by 15 bits to convert this to bitmap frames
+; required (shift right by 27 bits), we need a total of 8GB of memory to manage all 256TB of
+; system physical memory.  Since we are already managing 32GB of memory, we have enough memory
+; available to establish the bitmap for all possible physical memory.
+;----------------------------------------------------------------------------------------------
+
+                push        r10                     ; push the number of pages we need
+                push        rsi                     ; push the starting virtual address
+                call        VMMAlloc                ; go and allocate the memory
+                add.q       rsp,16                  ; clean up the stack
+
+                cmp.q       rax,VMM_ERR_NOMEM       ; did we run out of memory?
+                jne         .clear                  ; if not, we can clear the bits
+
+                mov.q       rax,errInit2Nomem       ; get the error message
+                push        rax                     ; push it on the stack
+                call        pmmError                ; report the error and kill system
+
+;----------------------------------------------------------------------------------------------
+; so, just like in PMMInit above, we will follow the same method to setup the bitmap.  First
+; we will 'artificially' mark everything as used.
+;----------------------------------------------------------------------------------------------
+
+.clear:         mov.q       rcx,R10                 ; get the bitmap additional # frames
+                shl.q       rcx,9                   ; convert the frames to qwords
+                mov.q       rdi,rsi                 ; get the starting addr for add'l bitmap
+                xor.q       rax,rax                 ; clear rax to set the qwords to used
+
+                rep         stosq                   ; set the bitmap to used
+
+;----------------------------------------------------------------------------------------------
+; Also, just like above, we will mark everything that multiboot gave us as free memory as free.
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rax,GetFreeFirst        ; get the address of the function
+                call        rax                     ; and make a far call to it
+
+;----------------------------------------------------------------------------------------------
+; At this point, rax has the address of the mmap structure or NULL if we are done with all
+; free entries
+;----------------------------------------------------------------------------------------------
+
+.loop:          cmp.q       rax,0                   ; are we done?
+                je          .out                    ; if so, go map the kernel memory
+
+;----------------------------------------------------------------------------------------------
+; We need to double check that the ending address is >32GB.  If it is not, we skip the block.
+; If it is > 32GB, then we need to make sure the starting address is >=32GB.  If it is < 32GB,
+; we will adjust it up to 32GB since we already initialized up to 32GB.
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rbx,[rax+FreeMem.str]   ; get the starting address
+                mov.q       rcx,[rax+FreeMem.size]  ; get the size of the block
+                mov.q       rdx,rcx                 ; we need a working value as well
+                add.q       rdx,rbx                 ; add the start and the size together
+                mov.q       r12,_32GB               ; get the _32GB constant
+
+                cmp.q       rdx,r12                 ; are we ending < 32GB?
+                jb          .iter                   ; if so, next block please
+
+                cmp.q       rbx,r12                 ; is the start >= 32GB
+                jae          .free                  ; < 32GB, we are good to free the block
+
+;----------------------------------------------------------------------------------------------
+; here we need to adjust the starting physical memory address to 32GB
+;----------------------------------------------------------------------------------------------
+
+                add.q       rcx,rbx                 ; adjust the size back to start addr == 0
+                mov.q       rbx,_32GB               ; start with 32GB
+                sub.q       rcx,rbx                 ; adjust the size to the new start addr
+
+;----------------------------------------------------------------------------------------------
+; now we just need to mark the block as free
+;----------------------------------------------------------------------------------------------
+
+.free:          and.q       rbx,~0x0fff             ; align the starting address
+                and.q       rcx,~0x0fff             ; align the block size
+
+                push        rcx                     ; push the size
+                push        rbx                     ; push the starting address
+                call        MarkBlockFree           ; free the block
+                add.q       rsp,16                  ; clean up the stack
+
+;----------------------------------------------------------------------------------------------
+; get the next block
+;----------------------------------------------------------------------------------------------
+
+.iter:          mov.q       rax,GetFreeNext         ; get the address of the function
+                call        rax                     ; and make a far call to it
+
+                jmp         .loop                   ; loop again
+
+;----------------------------------------------------------------------------------------------
+; Note that we have no need to go back and map out anything that was used before the PMM was
+; put in charge.  This is because nothing has been used above 32GB.
+;
+; clean up and exit
+;----------------------------------------------------------------------------------------------
+
+.out:
+                pop         r11                     ; restore r11
+                pop         r10                     ; restore r10
+                pop         r9                      ; restore r9
+                pop         rsi                     ; restore rsi
+                pop         rcx                     ; restore rcx
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
 
 ;==============================================================================================
 
@@ -713,6 +1000,13 @@ SetBitFree:
                 or.q        [rsi],rdx               ; set the bit to free
 
 ;----------------------------------------------------------------------------------------------
+; finally, we increment the number of free frames
+;----------------------------------------------------------------------------------------------
+
+                lea.q       rax,[r11+PMM.freeFrames] ; get the address of the free frames field
+                inc         qword [rax]              ; increment the number of free frames
+
+;----------------------------------------------------------------------------------------------
 ; clean up and exit
 ;----------------------------------------------------------------------------------------------
 
@@ -797,6 +1091,13 @@ SetBitUsed:
                 mov.q       rsi,PMM_VIRT            ; get the table address
                 add.q       rsi,rbx                 ; rsi now holds the address of the qword
                 and.q       [rsi],rdx               ; set the bit to used
+
+;----------------------------------------------------------------------------------------------
+; finally, we decrement the number of free frames
+;----------------------------------------------------------------------------------------------
+
+                lea.q       rax,[r11+PMM.freeFrames] ; get the address of the free frames field
+                dec         qword [rax]              ; decrement the number of free frames
 
 ;----------------------------------------------------------------------------------------------
 ; clean up and exit

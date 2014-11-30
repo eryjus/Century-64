@@ -91,6 +91,7 @@
 ; 2014/11/13  CleanUp  ADCL  Clean up some of the comments post-commit.  Made a change to my
 ;                            editor to save spaces instead of tabs.  Some changes made to
 ;                            accomodate already written code.
+; 2014/11/29  #210     ADCL  Add dynamic expansion of heap memory when no memory is available.
 ;
 ;==============================================================================================
 
@@ -109,7 +110,7 @@ ALLOC_MIN       equ     (KHeapHdr_size+KHeapFtr_size+ALLOC_MIN_BLK+ALLOC_MULT)&~
 KHEAP_MAGIC     equ     0xbab6badc
 
 HEAP_START      equ     0xffffa00000000000  ; this is the starting point for the kernel heap
-HEAP_END        equ     0xffffafffffffffff  ; this is the ending point for the kernel heap
+HEAP_END        equ     0xffffb00000000000  ; this is the ending point for the kernel heap
 HEAP_SIZE       equ     0x100000            ; the initial kernel heap mapped size (may expand)
 
 HEAP_PTR1       equ     512             ; anything >= 512 bytes
@@ -265,6 +266,8 @@ kmalloc:
                 mov.q       rbp,rsp                 ; create our own frame
                 push        rcx                     ; save rcx -- number of bytes requested
                 push        rsi                     ; save rsi -- header pointer
+                push        r10                     ; work reg for allocating more memory
+                push        r11                     ; work reg for allocating more memory
                 push        r14                     ; save r14 -- footer pointer
                 pushfq                              ; save the flags
 
@@ -306,14 +309,123 @@ kmalloc:
                 call        FindHole                ; see if we can find a hole the right size
                 add.q       rsp,8                   ; clean up the stack
 
+;----------------------------------------------------------------------------------------------
+; Here is where we expand the heap if we have run out of memory.  We will expand the heap by
+; HEAP_SIZE and then try to allocate memory again.
+;----------------------------------------------------------------------------------------------
+
                 cmp.q       rax,0                   ; did we get something?
-                je          .out                    ; if NULL, we did not; exit returning NULL
+                jne         .gotOne                 ; if not NULL, we did; continue on
+
+;----------------------------------------------------------------------------------------------
+; Here is the code added to allow for dynamic expansion of the heap memory.  To allow for this
+; expansion, we will perform the following:
+; 1) if kHeap.endAddr == kHeap.maxAddr, return 0
+; 2) make sure kHeap.endAddr + HEAP_SIZE if <= kHeap.maxAddr; if not, adjust it
+; 3) allocate the proper number of frames starting at kHeap.endAddr
+; 4) prepare the header and footer as if the block is used
+; 5) adjust the kHeap structure values
+; 6) call kfree to add the block to the freeblocks pool
+; 7) recursively call kmalloc to allocate the new block and return its return value
+;
+; First step 1...
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rbx,kHeap               ; get the address of the heap structure
+                mov.q       rax,[rbx+KHeap.endAddr] ; get the current ending address
+                cmp.q       rax,[rbx+KHeap.maxAddr] ; are we at our complete limit??
+                je          .noMem                  ; if so, exit
+
+;----------------------------------------------------------------------------------------------
+; step 2: now we calculate a new endAddr and check its validity.
+;----------------------------------------------------------------------------------------------
+
+                mov.q       r10,rax                 ; move the current endAddr into r10
+                mov.q       r11,HEAP_SIZE           ; get the size increment into r11
+                add.q       r10,r11                 ; add the next increment size
+                cmp.q       r10,[rbx+KHeap.maxAddr] ; did we exceed our limit??
+                jbe         .goodSize               ; if not, we have a good size
+
+                mov.q       r11,[rbx+KHeap.maxAddr] ; start with our maximum address
+                sub.q       r11,[rbx+KHeap.endAddr] ; sub endAddr, leaving the best increment
+
+;----------------------------------------------------------------------------------------------
+; step 3, now we allocate the memory we need.  we will start at kHeap.endAddr and r11>>12 will
+; be the number of frames we need.  This should be trivial with our VMM API.
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rcx,r11                 ; save the number of bytes for later
+                shr.q       r11,12                  ; convert bytes to pages
+                push        r11                     ; push this on the stack
+                mov.q       rax,[rbx+KHeap.endAddr] ; get the current ending address
+                push        rax                     ; and push it on the stack
+                call        VMMAlloc                ; get the memory
+                add.q       rsp,16                  ; clean up the stack
+
+                cmp.q       rax,VMM_ERR_NOMEM       ; did we run out of physical mem?
+                je          .noMem                  ; if so, we return 0
+
+;----------------------------------------------------------------------------------------------
+; step 4: rax now holds the block of memory, and rcx holds the number of bytes in the block.
+; so, we set up the standard pointers to the header and footer and initialize the block.
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rsi,rax                 ; get the block header
+                mov.q       r14,rsi                 ; start to calc the block footer address
+                add.q       r14,rcx                 ; add the number of bytes we allocated
+                sub.q       r14,KHeapFtr_size       ; back out the sixe of the footer
+
+                mov.d       [rsi+KHeapHdr.magic],KHEAP_MAGIC ; set the magic number
+                mov.d       [rsi+KHeapHdr.hole],0   ; This is not a hole
+                mov.q       [rsi+KHeapHdr.size],rcx ; this is the block size
+                mov.q       [rsi+KHeapHdr.prev],0   ; Set the previuos free block
+                mov.q       [rsi+KHeapHdr.next],0   ; set the next free block
+
+                mov.d       [r14+KHeapFtr.magic],KHEAP_MAGIC ; set the magic number
+                mov.d       [r14+KHeapFtr.fill],0   ; not required, but be complete
+                mov.q       [r14+KHeapFtr.hdr],rsi  ; set the header address
+
+;----------------------------------------------------------------------------------------------
+; step 5: now we adjust the heap structure so that kfree does not have a fit over the new block
+; being added to the free blocks pool
+;----------------------------------------------------------------------------------------------
+
+                add.q       [rbx+KHeap.endAddr],rcx ; add the new memory to the end of the heap
+
+;----------------------------------------------------------------------------------------------
+; step 6: free the block.  Just remember that kfree is looking for the address PAST the header.
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rax,rsi                 ; start with the header address
+                add.q       rax,KHeapHdr_size       ; move past the header
+                push        rax                     ; push the resulting address as parm
+                call        kfree                   ; free the block
+                add.q       rsp,8                   ; clean up the stack
+
+;----------------------------------------------------------------------------------------------
+; now, we recursively call kmalloc to allocate the proper size and return its return value
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rax,[rbp+16]            ; get the number of bytes
+                push        rax                     ; and push it for the call
+                call        kmalloc                 ; go allocate the memory
+                add.q       rsp,8                   ; clean up the stack
+
+                jmp         .out                    ; and exit with rax being returned
+
+;----------------------------------------------------------------------------------------------
+; if we execute this next section, we are out of memory or do not have a block big enough to
+; satisfy the request.
+;----------------------------------------------------------------------------------------------
+
+.noMem:         xor.q       rax,rax                 ; clear rax
+                jmp         .out                    ; go and exit
 
 ;----------------------------------------------------------------------------------------------
 ; we have a block that is at least big enough for our request, do we need to split it?
 ;----------------------------------------------------------------------------------------------
 
-                mov.q       rsi,rax                 ; save our header; rax will be used for calc
+.gotOne:        mov.q       rsi,rax                 ; save our header; rax will be used for calc
                 mov.q       rax,rcx                 ; get our adjusted size
                 sub.q       rax,[rbx+KHeapHdr.size] ; determine the difference in sizes
                 cmp.q       rax,ALLOC_MIN_BLK       ; is the leftover size enough to split blk?
@@ -361,6 +473,8 @@ kmalloc:
 
 .out:           popfq                               ; restore the flags & interrupts
                 pop         r14                     ; restore r14
+                pop         r11                     ; restore r11
+                pop         r10                     ; restore r10
                 pop         rsi                     ; restore rsi
                 pop         rcx                     ; restore rcx
                 pop         rbp                     ; restore caller's frame

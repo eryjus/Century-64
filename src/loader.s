@@ -66,6 +66,8 @@
 ;                            according to the steps above.
 ;                            At the same time, I will reformat this source file to match the
 ;                            adopted coding style and clean it up for general readibility.
+; 2014/11/29  #201     ADCL  Reclaim the memory that was used to get into 64-bit mode.
+;             #208           All the final clean-up has been completed.
 ;
 ;==============================================================================================
 
@@ -567,97 +569,74 @@ StartHigherHalf:
                 mov.q       rsp,STACK_LOC+STACK_SIZE; set up the real stack
 
 ;----------------------------------------------------------------------------------------------
+; now, reclaim all the temporary used space
+; A) Unmap the space from 0 to 640K
+;----------------------------------------------------------------------------------------------
+
+                extern      UnmapPageInTables
+                extern      nextFrame
+
+                xor.q       rbx,rbx                 ; clear rax
+                mov.q       rcx,0xa0                ; we need to unmap 160 pages
+                sub.q       rsp,8                   ; make room for 1 parameter
+
+.cleanup1:      mov.q       [rsp],rbx               ; set the address to clear
+                call        UnmapPageInTables       ; go and unmap the page
+
+                add.q       rbx,0x1000              ; move to the next page
+                loop        .cleanup1               ; loop until we unmap all the pages...
+
+;----------------------------------------------------------------------------------------------
+; B) Unmap the sapce from 0xffff 8000 0010 0000 to kernelStart
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rbx,0xffff800000100000  ; start of higher half code
+                mov.q       rcx,kernelEnd           ; start to calc the number of pages
+                sub.q       rcx,rbx                 ; now we have the size
+                shr.q       rcx,12                  ; convert bytes to pages
+
+.cleanup2:      mov.q       [rsp],rbx               ; set the address to clear
+                call        UnmapPageInTables       ; go and unmap the page
+
+                add.q       rbx,0x1000              ; move to the next page
+                loop        .cleanup2               ; loop until we unmap all the pages...
+
+;----------------------------------------------------------------------------------------------
+; C) Free the space from 0x100000 (1MB) to bootEnd
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rbx,bootEnd             ; get the end of the boot code section
+                sub.q       rbx,0x100000            ; subtract back 1MB
+                shr.q       rbx,12                  ; and convert the result to pages
+
+                push        rbx                     ; push it as parm on stack
+                mov.q       rbx,0x100000            ; we want 1MB
+                push        rbx                     ; push it as parm on stack
+                call        VMMFree                 ; reclaim the memory
+                add.q       rsp,16                  ; clean up the stack
+
+;----------------------------------------------------------------------------------------------
+; D) Unmap the space from bootEnd to 0x300000
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rbx,bootEnd             ; start of higher half code
+                mov.q       rcx,0x300000            ; start to calc the number of pages
+                sub.q       rcx,rbx                 ; now we have the size
+                shr.q       rcx,12                  ; convert bytes to pages
+
+.cleanup3:      mov.q       [rsp],rbx               ; set the address to clear
+                call        UnmapPageInTables       ; go and unmap the page
+
+                add.q       rbx,0x1000              ; move to the next page
+                loop        .cleanup3               ; loop until we unmap all the pages...
+
+                add.q       rsp,8                   ; clean up the stack
+
+;----------------------------------------------------------------------------------------------
 ; Now for some testing....
 ;----------------------------------------------------------------------------------------------
 
 .test:
-                push        '.'
-                call        TextPutChar
-                add.q       rsp,8
-
-                push        64                      ; get 64 bytes of mem
-                call        kmalloc                 ; allocate memory
-                mov.q       r15,rax                 ; save the result in r15
-
-                call        kmalloc                 ; allocate memory
-                mov.q       r14,rax                 ; save the result in r14
-
-                call        kmalloc                 ; allocate memory
-                mov.q       r13,rax                 ; save the result in r13
-
-                call        kmalloc                 ; allocate memory
-                mov.q       r12,rax                 ; save the result in r12
-
-                call        kmalloc                 ; allocate memory
-                mov.q       r11,rax                 ; save the result in r11
-
-                call        kmalloc                 ; allocate memory
-                mov.q       r10,rax                 ; save the result in r10
-
-                call        kmalloc                 ; allocate memory
-                mov.q       r9,rax                  ; save the result in r9
-
-                call        kmalloc                 ; allocate memory
-                mov.q       r8,rax                  ; save the result in r8
-
-                call        kmalloc                 ; allocate memory
-                mov.q       rdi,rax                 ; save the result in rdi
-
-                call        kmalloc                 ; allocate memory
-                mov.q       rsi,rax                 ; save the result in rsi
-
-                call        kmalloc                 ; allocate memory
-                mov.q       rdx,rax                 ; save the result in rdx
-
-                call        kmalloc                 ; allocate memory
-                mov.q       rcx,rax                 ; save the result in rcx
-
-                call        kmalloc                 ; allocate memory
-                mov.q       rbx,rax                 ; save the result in rbx
-
-
-                mov.q       [rsp],r8
-                call        kfree
-
-                mov.q       [rsp],r15
-                call        kfree
-
-                mov.q       [rsp],rsi
-                call        kfree
-
-                mov.q       [rsp],rbx
-                call        kfree
-
-                mov.q       [rsp],rdi
-                call        kfree
-
-                mov.q       [rsp],r12
-                call        kfree
-
-                mov.q       [rsp],r13
-                call        kfree
-
-                mov.q       [rsp],r14
-                call        kfree
-
-                mov.q       [rsp],r9
-                call        kfree
-
-                mov.q       [rsp],rcx
-                call        kfree
-
-                mov.q       [rsp],rdx
-                call        kfree
-
-                mov.q       [rsp],r10
-                call        kfree
-
-                mov.q       [rsp],r11
-                call        kfree
-
-                add.q       rsp,8
-
-                jmp         .test
 
 ;----------------------------------------------------------------------------------------------
 ; Just die for now; more to come here

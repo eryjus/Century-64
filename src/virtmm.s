@@ -684,6 +684,7 @@ MapPageInTables:
                 mov.q       rax,[rbp+24]            ; get the physical address into rax (again)
                 mov.q       [rbx+rdx],rax           ; set the address in the page table entry
                 or.q        [rbx+rdx],0x03          ; set the entry to be R/W & Present
+                invlpg      [r9]                    ; clear the tlb buffer
 
 ;----------------------------------------------------------------------------------------------
 ; clean up and exit
@@ -699,6 +700,64 @@ MapPageInTables:
                 pop         rbp                     ; restore caller's frame
                 ret
 
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; qword UnmapPageInTables(qword vAddr) -- Unmaps the specified page in virtual memory and
+;                                         returns the physical address to which it was mapped.
+;
+; *********************************************************************************************
+; *********************************************************************************************
+; **************************  I M P O R T A N T   N O T E ! ! ! *******************************
+; *********************************************************************************************
+; *********************************************************************************************
+;
+; This fucntion assumes that the page is question is mapped.  Therefore the calling function is
+; REQUIRED to ensure that there is a valid mapping before calling this funciton.  Failure to do
+; so will result in a page fault and therefore undesirable results.
+;----------------------------------------------------------------------------------------------
+
+                global      UnmapPageInTables
+
+UnmapPageInTables:
+                push        rbp                     ; save caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; our page table address
+                push        rcx                     ; the virtual address we are unmapping
+
+;----------------------------------------------------------------------------------------------
+; since we are guaranteed to have a mapped page, we go straight to the proper page table and
+; find the entry.
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rcx,[rbp+16]            ; get the virtual page address
+
+                push        rcx                     ; go ahead and push it on the stack
+                call        MmuPTable               ; get the page table address
+                mov.q       rbx,rax                 ; save off the page table address
+                call        MmuPTOffset             ; and immediately go get the offset
+                add.q       rsp,8                   ; clean up the stack
+
+                mov.q       rcx,[rbx+rax]           ; get the page from the page tables
+                mov.q       [rbx+rax],0             ; unmap the page
+
+;----------------------------------------------------------------------------------------------
+; at this point, it's might be worth checking all the higher level tables to see if we can
+; clear some of the higher level tables.  This tasks is logged as Redmine #176.
+;----------------------------------------------------------------------------------------------
+
+                and.q       rcx,~0x0fff             ; get the physical frame address
+                mov.q       rax,rcx                 ; set the return value
+
+;----------------------------------------------------------------------------------------------
+; clean up and exit
+;----------------------------------------------------------------------------------------------
+
+                pop         rcx                     ; restore rcx
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
 
 ;==============================================================================================
 
@@ -879,3 +938,107 @@ VMMAlloc:
                 pop         rbp                     ; restore caller's frame
                 ret
 
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; qword VMMFree(qword virtAddr, qword pages) -- Free a block of pages from the paging tables
+;                                               starting at virtAddr and going for pages pages.
+;
+; This function is the opposite of VMMFree.  No only will is remove the page from the paging
+; tree structure, but it will also release the physcial frame back to the PMM.  It is therefore
+; the responsibility of the caller to KNOW how many references there are for the physcial frame
+; before asking the PMM to free the memory.  This sounds risky to me and I might need to figure
+; out a reference count algorithm to add into the mix.  This will be determined as the system
+; grows.
+;
+; We should be able to service any request that is presented to this function.  However, there
+; are some sanity checks that need to be completed as well to make sure we are doing the right
+; thing.  These are:
+; 1.  virtAddr should be page-aligned.  If not, then the address will be truncated to a page
+;     and a warning will be presented back to the calling function.
+; 2.  Each page should be mapped.  In the event one is not mapped, a warning is returned back
+;     the the calling function and the page in question is skipped (for obvious reasons).
+;----------------------------------------------------------------------------------------------
+
+
+                global      VMMFree
+
+VMMFree:
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
+                push        rcx                     ; save rcx
+                push        rsi                     ; save rsi
+                push        r9                      ; temp return value
+
+                xor.q       r9,r9                   ; clear r9 to assume success
+
+;----------------------------------------------------------------------------------------------
+; first, make sure we have a page-aligned address
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rcx,[rbp+24]            ; get the number of pages to free
+
+                mov.q       rsi,[rbp+16]            ; get the address of the pages to start
+                test.q      rsi,0x0fff              ; are we page aligned?
+                jz          .loop                   ; skip any alignment
+
+                mov.q       r9,VMM_WARN_ALIGN       ; set a warning return message
+                and.q       rsi,~0x0fff             ; page align the address
+
+;----------------------------------------------------------------------------------------------
+; so now we get into the business of freeing pages.  The first thing is to determine if the
+; page is actually mapped.
+;----------------------------------------------------------------------------------------------
+
+.loop:          push        rsi                     ; push the virtual address
+                call        MmuIsPageMapped         ; and go find out if the page is mapped
+                add.q       rsp,8                   ; clean up the stack
+
+                cmp.q       rax,0                   ; 0 means the page is not mapped
+                je          .notMapped              ; if not mapped, go report the codition
+
+;----------------------------------------------------------------------------------------------
+; We know we have a mapped page for this address, so we need to go unmap it.
+;----------------------------------------------------------------------------------------------
+
+                push        rsi                     ; push the virtual address again
+                call        UnmapPageInTables       ; go and unmap the page in the tables
+                add.q       rsp,8                   ; clean up the stack
+
+                push        rax                     ; rax has the physical address
+                call        FreeFrame               ; go free the physical frame as well
+                add.q       rsp,8                   ; and clean up the stack again
+
+;----------------------------------------------------------------------------------------------
+; from here, just iterate until we are done
+;----------------------------------------------------------------------------------------------
+
+.iter:          add.q       rsi,0x1000              ; move to the next page
+                loop        .loop                   ; dec rcx, cmp rcx == 0
+
+                jmp         .out                    ; we can exit now
+
+;----------------------------------------------------------------------------------------------
+; at this point, we are trying to unmap a page that is not mapped.  Set the return value and
+; iterate.
+;----------------------------------------------------------------------------------------------
+
+.notMapped:     mov.q       r9,VMM_WARN_NOTMAPPED   ; set the return value
+                jmp         .iter                   ; go back and iterate
+
+;----------------------------------------------------------------------------------------------
+; clean up and exit
+;----------------------------------------------------------------------------------------------
+
+.out:
+                mov.q       rax,r9                  ; copy return val to rax
+
+                pop         r9                      ; restore r9
+                pop         rsi                     ; restore rsi
+                pop         rcx                     ; restore rcx
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
+
+;==============================================================================================
