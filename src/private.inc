@@ -4,6 +4,26 @@
 ;
 ; This file contains the external symbols that are used in all modules throughout this system.
 ;
+;**********************************************************************************************
+;
+;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
+;       Copyright (C) 2014  Adam Scott Clark
+;
+;       This program is free software: you can redistribute it and/or modify
+;       it under the terms of the GNU General Public License as published by
+;       the Free Software Foundation, either version 3 of the License, or
+;       any later version.
+;
+;       This program is distributed in the hope that it will be useful,
+;       but WITHOUT ANY WARRANTY; without even the implied warranty of
+;       MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;       GNU General Public License for more details.
+;
+;       You should have received a copy of the GNU General Public License along
+;       with this program.  If not, see http://www.gnu.org/licenses/gpl-3.0-standalone.html.
+;
+;**********************************************************************************************
+;
 ;    Date     Tracker  Pgmr  Description
 ; ----------  ------   ----  ------------------------------------------------------------------
 ; 2014/10/06  Initial  ADCL  Initial version
@@ -93,8 +113,6 @@
 ;----------------------------------------------------------------------------------------------
 
 VIRT_BASE       equ         0xffffffff80000000
-
-STACK_LOC       equ         0xfffff00200000000
 STACK_SIZE      equ         0x0000000000004000              ; 16K
 
 %ifndef __LOADER_S__
@@ -185,4 +203,15 @@ VMM_ERR_NOMEM   equ         0xffffffffffffffff
                 extern      VMMInit
                 extern      VMMAlloc
                 extern      VMMFree
+                extern      ReclaimMemory
+                extern      AllocStack
 %endif
+
+;----------------------------------------------------------------------------------------------
+; -- the following symbols are found in gdt-tss.s
+;----------------------------------------------------------------------------------------------
+
+%ifndef __GDT_TSS_S__
+                extern      GDTInit
+%endif
+

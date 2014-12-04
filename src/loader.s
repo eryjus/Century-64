@@ -7,6 +7,26 @@
 ; that are required to be 4-byte aligned and must be in the first 8K of the file for the final
 ; binary to be Multiboot compliant.  These structures are implemented here.
 ;
+;**********************************************************************************************
+;
+;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
+;       Copyright (C) 2014  Adam Scott Clark
+;
+;       This program is free software: you can redistribute it and/or modify
+;       it under the terms of the GNU General Public License as published by
+;       the Free Software Foundation, either version 3 of the License, or
+;       any later version.
+;
+;       This program is distributed in the hope that it will be useful,
+;       but WITHOUT ANY WARRANTY; without even the implied warranty of
+;       MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;       GNU General Public License for more details.
+;
+;       You should have received a copy of the GNU General Public License along
+;       with this program.  If not, see http://www.gnu.org/licenses/gpl-3.0-standalone.html.
+;
+;**********************************************************************************************
+;
 ;    Date     Tracker  Pgmr  Description
 ; ----------  ------   ----  ------------------------------------------------------------------
 ; 2014/09/24  Initial  ADCL  Leveraged from osdev.org -- "Higher Half Bare Bones" wiki
@@ -68,6 +88,11 @@
 ;                            adopted coding style and clean it up for general readibility.
 ; 2014/11/29  #201     ADCL  Reclaim the memory that was used to get into 64-bit mode.
 ;             #208           All the final clean-up has been completed.
+; 2014/12/01  #215     ADCL  So, the GDT is going to be built from kernel heap.  So, the one
+;                            that is created as soon as we get into higher memory is not
+;                            needed.  Remove that GDT and replace it with a call to GDTInit.
+;                            In addition, some general cleanup of unnecessary calls.
+; 2014/12/02  #217     ADCL  Relocated the paging clean into a function in virtmm.s.
 ;
 ;==============================================================================================
 
@@ -94,7 +119,7 @@ MBMAGIC2        equ         0xe85250d6
 MBLEN           equ         MultibootHeader2End - MultibootHeader2
 MBCHECK2        equ         (-(MBMAGIC2 + 0 + MBLEN) & 0xffffffff)
 
-STACKSIZE       equ         0x4000              ; 16K stack
+STACKSIZE       equ         0x400              ; 1K stack
 
 ;==============================================================================================
 ; The .multiboot section will be loaded at 0x100000 (1MB).  It is intended to provide the
@@ -213,7 +238,6 @@ mbEBX:          dd          0                   ; we will store ebx from MB here
 ;==============================================================================================
 
                 section     .bootstack
-                align       0x1000
 
 stack32:        times(STACKSIZE)    db      0
 
@@ -289,7 +313,10 @@ EntryPoint:
                 mov.d       ecx,1<<31               ; set up the paging bit
                 not.d       ecx                     ; bitwise not
                 and.d       eax,ecx                 ; make sure paging is disabled
+                mov.d       ebx,.tgt1               ; random failures can occur if do not jmp
                 mov.d       cr0,eax                 ; set CR0 with the new flags
+
+                jmp         ebx                     ; make this code comply with Intel docs
 
 ;----------------------------------------------------------------------------------------------
 ; Since we now KNOW we are in protected mode, let's call that our second milestons.  Put a "B"
@@ -298,6 +325,14 @@ EntryPoint:
 ; Note that at this point, we have also accomplished the first step required to get into
 ; long mode (as mentioned in the header comments).
 ;----------------------------------------------------------------------------------------------
+
+ .tgt1:         mov.d       eax,0x10                ; set the segment selector for data segs
+                mov.w       ds,ax
+                mov.w       es,ax
+                mov.w       fs,ax
+                mov.w       gs,ax
+                mov.w       ss,ax
+                mov.d       esp,esp
 
                 mov.w       [edi],(0x0f<<8)|'B'     ; put an "B" on the screen
                 add.d       edi,2                   ; move to the next pos on the screen
@@ -452,16 +487,14 @@ gdt64enable:
                 mov.w       fs,ax
                 mov.w       gs,ax
                 mov.w       ss,ax
+                mov.q       rsp,rsp                 ; keep the same stack
 
 ;----------------------------------------------------------------------------------------------
 ; go and find the multiboot signature
 ;----------------------------------------------------------------------------------------------
 
-                mov.q       rsp,stack+STACKSIZE
-
                 mov.q       rax,CheckMB             ; this must be a far call!!!
                 call        rax                     ; get MB info and map free memory
-
 
 ;----------------------------------------------------------------------------------------------
 ; At this point, we have now entered 64-bit code.  Our GDT is sill sitting in the space we
@@ -480,35 +513,6 @@ gdt64enable:
                 jmp         rax                     ; and jump to it
 
 ;==============================================================================================
-; The .data segment will hold all data related to the kernel
-;==============================================================================================
-
-                section     .data
-                align       8
-
-gdt:
-                dq          0                       ; GDT entry 0x00
-                dq          0x00a09a0000000000      ; GDT entry 0x08
-                dq          0x00a0920000000000      ; GDT entry 0x10
-gdtEnd:
-
-gdtr:
-                dw          gdtEnd-gdt-1
-                dq          gdt
-
-HelloString:
-                db          'Welcome to Century-64',13
-                db          "  (it's gonna take a century to finish!)",13,13
-                db          "---------- __o       __o       __o       __o",13
-                db          "-------- _`\<,_    _`\<,_    _`\<,_    _`\<,_",13
-                db          "------- (*)/ (*)  (*)/ (*)  (*)/ (*)  (*)/ (*)",13
-                db          "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",13
-                db          "   ... speed is good!",13,13,0
-
-kHeapMsg:
-                db          '                     This is a test kHeap error message',0
-
-;==============================================================================================
 ; The .text section is the 64-bit kernel proper
 ;==============================================================================================
 
@@ -520,35 +524,11 @@ StartHigherHalf:
                 mov.w       [rbx],0x0f<<8|'G'       ; put a "G" on the screen
 
 ;----------------------------------------------------------------------------------------------
-; Now that we are finally in higher-memory, we can set the final GDT.  However, there is a
-; catch: the GDT must be in 32-bit accessable memory!!!  Therefore, we need to set this up
-; in lower memory.  I pick the lower address of the boot stack (whcih we are no longer using
-; at this point.
+; Print the banner text
 ;----------------------------------------------------------------------------------------------
-
-                mov.q       rax,gdtr                ; get the address of our GDT
-                lgdt        [rax]                   ; Load our own 64-bit GDT
-                jmp         .gdtenable
-
-.gdtenable:
-                mov.q       rax,0x10                ; set the segment selector for DS
-                mov.w       ds,ax
-                mov.w       es,ax
-                mov.w       fs,ax
-                mov.w       gs,ax
-                mov.w       ss,ax
-
-                mov.q       rsp,rsp                 ; set the stack to itself...  will chg soon
-
-                mov.q       rbx,0xb8000+14
-                mov.w       [rbx],0x0f<<8|'H'       ; put a "H" on the screen
 
                 call        TextSetBlockCursor      ; create a block cursor
                 call        TextClear               ; clear the screen
-
-;----------------------------------------------------------------------------------------------
-; Print the banner text
-;----------------------------------------------------------------------------------------------
 
                 mov.q       rbx,HelloString         ; get the hello string to print
                 push        rbx                     ; and push it on the stack
@@ -560,77 +540,25 @@ StartHigherHalf:
 ;----------------------------------------------------------------------------------------------
 
                 call        PMMInit                 ; initialize the physical frames in PMM
-                call        VMMInit                 ; complete the init of the virtual mem mgr
                 call        PMMInit2                ; if more than 32GB memory, we to complete
                 call        HeapInit                ; initialize the heap
-
-                mov.q       rax,0x10                ; set the segment selector for DS
-                mov.w       ss,ax                   ; force a pause in interrupts for 1 instr
-                mov.q       rsp,STACK_LOC+STACK_SIZE; set up the real stack
+                call        GDTInit                 ; initialize the final GDT and TSSs
+                call        VMMInit                 ; complete the init of the virtual mem mgr
 
 ;----------------------------------------------------------------------------------------------
-; now, reclaim all the temporary used space
-; A) Unmap the space from 0 to 640K
+; we need to change the stack at the highest call level so we don't lose any return RIP values.
 ;----------------------------------------------------------------------------------------------
 
-                extern      UnmapPageInTables
-                extern      nextFrame
-
-                xor.q       rbx,rbx                 ; clear rax
-                mov.q       rcx,0xa0                ; we need to unmap 160 pages
-                sub.q       rsp,8                   ; make room for 1 parameter
-
-.cleanup1:      mov.q       [rsp],rbx               ; set the address to clear
-                call        UnmapPageInTables       ; go and unmap the page
-
-                add.q       rbx,0x1000              ; move to the next page
-                loop        .cleanup1               ; loop until we unmap all the pages...
+                add.q       rax,STACK_SIZE          ; adjust to the top of the stack
+                mov.q       rbx,0x10                ; set the stack selector
+                mov.w       ss,bx                   ; set the ss reg
+                mov.q       rsp,rax                 ; load the new stack pointer
 
 ;----------------------------------------------------------------------------------------------
-; B) Unmap the sapce from 0xffff 8000 0010 0000 to kernelStart
+; reclaim the memory we no longer need
 ;----------------------------------------------------------------------------------------------
 
-                mov.q       rbx,0xffff800000100000  ; start of higher half code
-                mov.q       rcx,kernelEnd           ; start to calc the number of pages
-                sub.q       rcx,rbx                 ; now we have the size
-                shr.q       rcx,12                  ; convert bytes to pages
-
-.cleanup2:      mov.q       [rsp],rbx               ; set the address to clear
-                call        UnmapPageInTables       ; go and unmap the page
-
-                add.q       rbx,0x1000              ; move to the next page
-                loop        .cleanup2               ; loop until we unmap all the pages...
-
-;----------------------------------------------------------------------------------------------
-; C) Free the space from 0x100000 (1MB) to bootEnd
-;----------------------------------------------------------------------------------------------
-
-                mov.q       rbx,bootEnd             ; get the end of the boot code section
-                sub.q       rbx,0x100000            ; subtract back 1MB
-                shr.q       rbx,12                  ; and convert the result to pages
-
-                push        rbx                     ; push it as parm on stack
-                mov.q       rbx,0x100000            ; we want 1MB
-                push        rbx                     ; push it as parm on stack
-                call        VMMFree                 ; reclaim the memory
-                add.q       rsp,16                  ; clean up the stack
-
-;----------------------------------------------------------------------------------------------
-; D) Unmap the space from bootEnd to 0x300000
-;----------------------------------------------------------------------------------------------
-
-                mov.q       rbx,bootEnd             ; start of higher half code
-                mov.q       rcx,0x300000            ; start to calc the number of pages
-                sub.q       rcx,rbx                 ; now we have the size
-                shr.q       rcx,12                  ; convert bytes to pages
-
-.cleanup3:      mov.q       [rsp],rbx               ; set the address to clear
-                call        UnmapPageInTables       ; go and unmap the page
-
-                add.q       rbx,0x1000              ; move to the next page
-                loop        .cleanup3               ; loop until we unmap all the pages...
-
-                add.q       rsp,8                   ; clean up the stack
+                call        ReclaimMemory
 
 ;----------------------------------------------------------------------------------------------
 ; Now for some testing....
@@ -648,12 +576,23 @@ StartHigherHalf:
                 jmp         .loop
 
 ;==============================================================================================
-; The .bss section so far contains the kernel stack
+; The .rodata segment will hold all data related to the kernel
 ;==============================================================================================
 
-                section     .bss
-                align       0x1000
+                section     .rodata
 
-stack:          resb        STACKSIZE
+HelloString:
+                db          'Welcome to Century-64, a 64-bit Hobby Operating System',13
+                db          "  (it's gonna take a century to finish!)",13,13
+                db          "---------- __o       __o       __o       __o",13
+                db          "-------- _`\<,_    _`\<,_    _`\<,_    _`\<,_",13
+                db          "------- (*)/ (*)  (*)/ (*)  (*)/ (*)  (*)/ (*)",13
+                db          "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",13
+                db          "   ... speed is good!",13,13,13,13,13,13,13,13,13,13,13
+                db          "               Century-64  Copyright (C) 2014  Adam Scott Clark",13,13
+                db          "This program comes with ABSOLUTELY NO WARRANTY.  This is free software, and you",13
+                db          "are welcome to redistribute it under certain conditions.  For more information,",13
+                db          "see http://www.gnu.org/licenses/gpl-3.0-standalone.html",13,0
 
-;==============================================================================================
+kHeapMsg:
+                db          '                     This is a test kHeap error message',0

@@ -5,6 +5,26 @@
 ; This file contains the functions and data that will be used to manage the physical memory
 ; layer of this kernel
 ;
+;**********************************************************************************************
+;
+;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
+;       Copyright (C) 2014  Adam Scott Clark
+;
+;       This program is free software: you can redistribute it and/or modify
+;       it under the terms of the GNU General Public License as published by
+;       the Free Software Foundation, either version 3 of the License, or
+;       any later version.
+;
+;       This program is distributed in the hope that it will be useful,
+;       but WITHOUT ANY WARRANTY; without even the implied warranty of
+;       MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;       GNU General Public License for more details.
+;
+;       You should have received a copy of the GNU General Public License along
+;       with this program.  If not, see http://www.gnu.org/licenses/gpl-3.0-standalone.html.
+;
+;**********************************************************************************************
+;
 ; After a number of days of internal debate, I have settled on a bitmap for my memory manager
 ; implementation.  I will implement this bitmap with one slight modification to the simplistic
 ; implementation: I will maintain a pointer in the bitmap where the last block was found to be
@@ -1010,7 +1030,7 @@ SetBitFree:
 ; clean up and exit
 ;----------------------------------------------------------------------------------------------
 
-                popfq                               ; restore the flags (restore int flag)
+.out:           popfq                               ; restore the flags (restore int flag)
                 pop         r11                     ; restore r11
                 pop         rsi                     ; restore rsi
                 pop         rdx                     ; restore rdx

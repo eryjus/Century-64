@@ -3,7 +3,27 @@
 ; virtmm.s
 ;
 ; This file contains the functions and data that will be used to manage the virtual memory
-; layer of this kernel
+; layer of this kernel.
+;
+;**********************************************************************************************
+;
+;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
+;       Copyright (C) 2014  Adam Scott Clark
+;
+;       This program is free software: you can redistribute it and/or modify
+;       it under the terms of the GNU General Public License as published by
+;       the Free Software Foundation, either version 3 of the License, or
+;       any later version.
+;
+;       This program is distributed in the hope that it will be useful,
+;       but WITHOUT ANY WARRANTY; without even the implied warranty of
+;       MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;       GNU General Public License for more details.
+;
+;       You should have received a copy of the GNU General Public License along
+;       with this program.  If not, see http://www.gnu.org/licenses/gpl-3.0-standalone.html.
+;
+;**********************************************************************************************
 ;
 ; Like the physical memory layer, this layer caused me a lot of internal debate.  Not about how
 ; to architect the layer, but how responsible to make it for the memory.  Should the VMM keep
@@ -16,10 +36,21 @@
 ; My own thoughts for this module are tracked here: http://redmine:3000/issues/174 (on my own
 ; personal network; so, if you are looking at this from github you are kinda out of luck).
 ;
+; I am also adding stack alloction support into this source file.  All stacks will be 16KB big
+; to make the work easier.  I already have a region of memory dedicated to stacks from which
+; the kernel stack is already pulled: 0xffff f002 0000 0000 for 8GB.  At 16KB, this is room for
+; exactly 524,288 (or 512K) stacks.  Using a bitmap to manage these, it will take 65,536 bytes
+; to keep track of these stacks, 8192 qwords, or 16 pages.  It's not particularly large or
+; sophisticated, so the management will be nearly trivial.
+;
 ; The following are the functions delivered in this source file:
-;   void VMMInit(void);
+;   qword VMMInit(void);
 ;   void MapPageInTables(qword vAddr, qword pAddr);
-;   dword UnmapPage(qword virtAddr);
+;   dword UnmapPageInTables(qword virtAddr);
+;   qword VMMAlloc(qword virtAddr, qword pages);
+;   qword VMMFree(qword virtAddr, qword pages);
+;   void ReclaimMemory(void);
+;   qword AllocStack(void);
 ;
 ; The following are the internal functions that will be used in this source file:
 ;   qword MmuPML4Table(qword addr);
@@ -34,7 +65,7 @@
 ;   qword MmuIsPageMapped(qword virtAddr);
 ;
 ;    Date     Tracker  Pgmr  Description
-; ----------  ------   ----  ------------------------------------------------------------------
+; ----------  -------  ----  ------------------------------------------------------------------
 ; 2014/10/17  Initial  ADCL  Initial code
 ; 2014/11/15  #200     ADCL  OK, this source will undergo several major changes.  First, I will
 ;                            leverage several macros and functions from a post by bluemoon
@@ -44,6 +75,17 @@
 ; 2014/11/24  #200     ADCL  So, MapPageInTables now needs to be rewritten to account for the
 ;                            fact that it is called when paging is enabled and the PMM now has
 ;                            control over physical memory management.
+; 2014/11/30  #212     ADCL  Bochs was working properly; QEMU was not working properly.  I
+;                            found the reason was that I was clearing too many pages from the
+;                            higher-half code pages.  However, the real core issue was that
+;                            UnmapPageInTables was not clearing the TLB for that address.
+; 2014/12/02  #217     ADCL  Relocated the paging clean into a function here.
+; 2014/12/02  #213     ADCL  As a result of creating the TSS, and along with all the stacks
+;                            we will leverage in that structure, I will be creating a function
+;                            to allocate a stack from the pool of stack memory.  This memory
+;                            can support up to 524,288 stacks (512K), each 16K in size.  All
+;                            stacks will be the same size, so it makes allocation easy to
+;                            manage.
 ;
 ;==============================================================================================
 
@@ -71,6 +113,17 @@ VMM_PHYS_START  equ         0x0000000000400000
 PAGE_TREE_TEMP  equ         0xffffff7ffffff000  ; this is a temporary location to be used
                                                 ; to clear a page table struct before adding
                                                 ; into the paging structure tree for real.
+
+STACK_LOC       equ         0xfffff00200000000
+STACK_BM_SIZE   equ         (16*1024)           ; 16K for the stack bitmap
+
+;==============================================================================================
+; This is the .bss section.  It contains uninitialized data.
+;==============================================================================================
+
+                section     .bss
+
+stackBitmap     resq        1                   ; This is a pointer to the stack alloc bitmap
 
 ;==============================================================================================
 ; The .text section is part of the kernel proper
@@ -751,6 +804,13 @@ UnmapPageInTables:
                 mov.q       rax,rcx                 ; set the return value
 
 ;----------------------------------------------------------------------------------------------
+; finally, flush the TLB buffer
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rcx,[rbp+16]            ; get the vurtual address again
+                invlpg      [rcx]                   ; flush the TLB for this address
+
+;----------------------------------------------------------------------------------------------
 ; clean up and exit
 ;----------------------------------------------------------------------------------------------
 
@@ -762,14 +822,15 @@ UnmapPageInTables:
 ;==============================================================================================
 
 ;----------------------------------------------------------------------------------------------
-; void VMMInit(void) -- Complete the initialzation that was started in 32-bit mode and un-map
-;                       the pages that were mapped with a broad paint brush.  It's time to
-;                       fine tune the virtual memory map.
+; qwsord VMMInit(void) -- Complete the initialzation that was started in 32-bit mode and un-map
+;                        the pages that were mapped with a broad paint brush.  It's time to
+;                        fine tune the virtual memory map.
 ;
 ; This function is going to have to be completely rewritten since the bulk of its work was
 ; completed with PagingInit().
 ;
-; Currently, this function in a mere stub.
+; VMMInit will return the address of the stack (the lowest address), so the stack pointer will
+; need to be adjusted to align to the other side of the stack since stacks grow down.
 ;----------------------------------------------------------------------------------------------
 
                 global      VMMInit
@@ -777,18 +838,40 @@ UnmapPageInTables:
 VMMInit:
                 push        rbp                     ; save rbp
                 mov.q       rbp,rsp                 ; create a stack frame
+                push        rbx                     ; save rbx
+                push        rcx                     ; save rcx
+                push        rdi                     ; save rdi
 
 ;----------------------------------------------------------------------------------------------
-; let's map the stack for real here.
+; First, let's start by initializing the stack bitmap
 ;----------------------------------------------------------------------------------------------
 
-                mov.q       rax,STACK_SIZE>>12      ; get the number of frames needed for stack
-                push        rax                     ; push it on the stack
-                mov.q       rax,STACK_LOC           ; get the address of the stack
-                push        rax                     ; push it on the stack
-                call        VMMAlloc                ; go allocate the memory; throws warning
-                add.q       rsp,16                  ; clean up the stack
+                mov.q       rax,STACK_BM_SIZE       ; we need to allocate 16K from the heap
+                call        kmalloc                 ; go get a block of memory
+                                                    ; for the moment, assume we got a block
 
+                mov.q       rbx,stackBitmap         ; get the address of the var
+                mov.q       [rbx],rax               ; save the bitmap pointer
+
+                mov.q       rdi,rax                 ; set the destination
+                mov.q       rcx,STACK_BM_SIZE>>3    ; convert bytes to qwords
+                mov.q       rax,-1                  ; fill the bitmap, setting all to free
+
+                rep         stosq                   ; clear the bitmap
+
+;----------------------------------------------------------------------------------------------
+; allocate a real stack for the kernel
+;----------------------------------------------------------------------------------------------
+
+                call        AllocStack              ; go and allocate a stack
+
+;----------------------------------------------------------------------------------------------
+; clean up and exit
+;----------------------------------------------------------------------------------------------
+
+                pop         rdi                     ; restore rdi
+                pop         rcx                     ; restore rcx
+                pop         rbx                     ; restore rbx
                 pop         rbp                     ; restore previous frame
                 ret
 
@@ -1036,6 +1119,242 @@ VMMFree:
 
                 pop         r9                      ; restore r9
                 pop         rsi                     ; restore rsi
+                pop         rcx                     ; restore rcx
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; void ReclaimMemory(void) -- Reclaim memory after initialization.  Anything that was used to
+;                             get the system operational will be reclaimed by this function.
+;                             most of this is virtual memory, but some will be physcial pages
+;                             as well.
+;----------------------------------------------------------------------------------------------
+
+                global      ReclaimMemory
+
+ReclaimMemory:
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
+                push        rcx                     ; save rcx
+
+;----------------------------------------------------------------------------------------------
+; now, reclaim all the temporary used space
+; A) Unmap the space from 0 to 640K
+;----------------------------------------------------------------------------------------------
+
+                xor.q       rbx,rbx                 ; clear rax
+                mov.q       rcx,0xa0                ; we need to unmap 160 pages
+                sub.q       rsp,8                   ; make room for 1 parameter
+
+.cleanup1:      mov.q       [rsp],rbx               ; set the address to clear
+                call        UnmapPageInTables       ; go and unmap the page
+
+                add.q       rbx,0x1000              ; move to the next page
+                loop        .cleanup1               ; loop until we unmap all the pages...
+
+;----------------------------------------------------------------------------------------------
+; B) Unmap the sapce from 0xffff 8000 0010 0000 to kernelStart
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rbx,0xffff800000100000  ; start of higher half code
+                mov.q       rcx,kernelStart         ; start to calc the number of pages
+                sub.q       rcx,rbx                 ; now we have the size
+                shr.q       rcx,12                  ; convert bytes to pages
+
+.cleanup2:      mov.q       [rsp],rbx               ; set the address to clear
+                call        UnmapPageInTables       ; go and unmap the page
+
+                add.q       rbx,0x1000              ; move to the next page
+                loop        .cleanup2               ; loop until we unmap all the pages...
+
+;----------------------------------------------------------------------------------------------
+; C) Free the space from 0x100000 (1MB) to bootEnd
+;----------------------------------------------------------------------------------------------
+                extern      CODE_VIRT
+
+                mov.q       rbx,kernelStart         ; get the end of the boot code section
+                mov.q       rax,CODE_VIRT           ; get the virtual offset
+                sub.q       rbx,rax                 ; subtract code virtual offset
+                sub.q       rbx,0x100000            ; subtract back 1MB
+                shr.q       rbx,12                  ; and convert the result to pages
+
+                push        rbx                     ; push it as parm on stack
+                mov.q       rbx,0x100000            ; we want 1MB
+                push        rbx                     ; push it as parm on stack
+                call        VMMFree                 ; reclaim the memory
+                add.q       rsp,16                  ; clean up the stack
+
+;----------------------------------------------------------------------------------------------
+; D) Unmap the space from bootEnd to 0x300000
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rbx,bootEnd             ; start of higher half code
+                mov.q       rcx,0x300000            ; start to calc the number of pages
+                sub.q       rcx,rbx                 ; now we have the size
+                shr.q       rcx,12                  ; convert bytes to pages
+
+.cleanup3:      mov.q       [rsp],rbx               ; set the address to clear
+                call        UnmapPageInTables       ; go and unmap the page
+
+                add.q       rbx,0x1000              ; move to the next page
+                loop        .cleanup3               ; loop until we unmap all the pages...
+
+                add.q       rsp,8                   ; clean up the stack
+
+;----------------------------------------------------------------------------------------------
+; clean up and exit
+;----------------------------------------------------------------------------------------------
+
+                pop         rcx                     ; restore rcx
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; qword AllocStack(void) -- Allocate a 16KB stack from the stack area, mark the stack as used,
+;                           and allocate the frames needed for this stack.  Return its LOW
+;                           address, so the calling function will need to adjust since the
+;                           stack grows down.
+;----------------------------------------------------------------------------------------------
+
+                global      AllocStack
+
+AllocStack:
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
+                push        rcx                     ; save rcx
+                push        rdx                     ; save rdx
+                push        rdi                     ; save rdi
+                push        r9                      ; save r9
+                pushfq                              ; save the flags
+                cli                                 ; no interrupts, please
+
+;----------------------------------------------------------------------------------------------
+; First, let's initialize the registers
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rbx,stackBitmap         ; get the address of the bitmap pointer
+                mov.q       rdi,[rbx]               ; get the bitmap address is rdi
+                mov.q       rbx,rdi                 ; make rbx also point to bitmap start
+                xor.q       rax,rax                 ; clear rax
+                mov.q       rcx,STACK_BM_SIZE>>3    ; get the number of qwords to look through
+
+                repz        scasq                   ; scan the bitmap for a free stack
+
+;----------------------------------------------------------------------------------------------
+; the above statement is significant in that there are 2 termination conditions that can bring
+; us to this point:
+; 1) rcx == 0
+; 2) qword ptr [rdi] <> 0
+;
+; we need to determine which has caused us to get here.  If rcx is 0, then we need to check the
+; last qword of the bitmap to make see if we have a free stack.
+;
+; When we have no free stack, we will return 0.
+;
+; When we have a free stack, rcx will need to be used to determine the qword offset that holds
+; the free bit.  Remember that a 1 means free and a 0 means used.
+;----------------------------------------------------------------------------------------------
+
+                cmp.q       rcx,0                   ; did we find a free stack?
+                jne         .found                  ; if not 0, we KNOW we found a block
+
+                mov.q       rax,STACK_BM_SIZE>>3    ; get the number of qwords in the bitmap
+                dec         rax                     ; sub 1 to get the proper qword offset
+                cmp.q       [rbx+rax],0             ; is the last byte fully allocated
+                jne         .found                  ; if not, we found a block
+
+.none:          xor.q       rax,rax                 ; clear the return value
+                jmp         .out                    ; no more room; return 0
+
+;----------------------------------------------------------------------------------------------
+; So, we know we have an available stack.  We determine the byte offset of the qword using the
+; following formula: STACK_BM_SIZE - (rcx<<3).  This will provide the qword we need to further
+; investigate.  From there, we just need to query the bits one at a time to find the proper
+; stack.
+;----------------------------------------------------------------------------------------------
+
+.found:
+                mov.q       rax,rcx                 ; move the qword offset
+                shl.q       rax,3                   ; convert the qwords to bytes
+                mov.q       rcx,STACK_BM_SIZE       ; get the byte size
+                sub.q       rcx,rax                 ; rcx now holds the byte offset into bmap
+
+                mov.q       rax,[rbx+rcx]           ; get the qword in question; some bit is 1
+                mov.q       rcx,rdx                 ; move the qword offset
+                xor.q       rcx,rcx                 ; clear rcx
+
+;----------------------------------------------------------------------------------------------
+; now, we want to test the bits in turn to determine the free stack
+;----------------------------------------------------------------------------------------------
+
+.loop:          mov.q       r9,1                    ; we need to work with a single bit
+                shl.q       r9,cl                   ; shift the bit to get the right mask
+
+                test.q      rax,r9                  ; is the bit 1?
+                jnz         .markUsed               ; we found it, go mark it as used
+
+                inc         rcx                     ; move to the next bit
+                cmp.q       rcx,63                  ; have we tested all bits?
+                ja          .none                   ; something happened, we have none
+
+                jmp         .loop                   ; loop to check the next one
+
+;----------------------------------------------------------------------------------------------
+; we found our bit. marking it used is simple.  However we need to preserve the values in
+; rax, rbx, rcx, and rdx
+;----------------------------------------------------------------------------------------------
+
+.markUsed:      not.q       r9                      ; invert this bit mask
+                and.q       [rbx+rdx],r9            ; and mark the stack as used
+
+;----------------------------------------------------------------------------------------------
+; now we can calculate the low address of the stack and set it to be returned.  We know the
+; starting address of the stack range as STACK_LOC.  Each qword in the bitmap controls 64
+; stacks (each 16K).  rdx has the byte offset of the qword we know to have the stack we want.
+; So, we will need to convert rdx back to a qword index by using rdx >> 3.  Now, we need to
+; adjust for the qwords we skipped.  This is done by rdx << 20 since each qword controls 1MB
+; of stack space (bytes).  This results in a net rdx << 17 operation.  rdx also hold the number
+; of 16K stacks we need to adjust to.  So, we can adjust rcx << 14 to get the offset to the
+; start of the stack space.  Now, we add STACK_LOC, rdx, and rcx together, and we get the LOW
+; address of the stack we want to return.
+;----------------------------------------------------------------------------------------------
+
+                shl.q       rdx,17                  ; adjust rcx
+                shl.q       rcx,14                  ; adjust rdx
+
+                mov.q       rax,STACK_LOC           ; get the base stack space address
+                add.q       rax,rdx                 ; adjust for qwords skipped
+                add.q       rax,rcx                 ; adjust for bits skipped
+
+;----------------------------------------------------------------------------------------------
+; the final task here is to make sure the virtual memory we just allocated is mapped.
+;----------------------------------------------------------------------------------------------
+
+                mov.q       r9,STACK_BM_SIZE        ; get the stack size
+                shr.q       r9,12                   ; convert to pages -- assumes page multiple
+                push        r9                      ; push pages to alloc
+                push        rax                     ; push starting address
+                call        VMMAlloc                ; go and allocate the pages
+                pop         rax                     ; we need to recover our address
+                add.q       rsp,8                   ; clean up the stack
+
+;----------------------------------------------------------------------------------------------
+; clean up and exit
+;----------------------------------------------------------------------------------------------
+
+.out:
+                popfq                               ; restore flags (with interrupts)
+                pop         r9                      ; restore r9
+                pop         rdi                     ; restore rdi
+                pop         rdx                     ; restore rdx
                 pop         rcx                     ; restore rcx
                 pop         rbx                     ; restore rbx
                 pop         rbp                     ; restore caller's frame

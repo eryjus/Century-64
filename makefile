@@ -4,6 +4,26 @@
 #
 # This file contains the recipes to make the Century-64 kernel.
 #
+#*********************************************************************************************
+#
+#       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
+#       Copyright (C) 2014  Adam Scott Clark
+#
+#       This program is free software: you can redistribute it and/or modify
+#       it under the terms of the GNU General Public License as published by
+#       the Free Software Foundation, either version 3 of the License, or
+#       any later version.
+#
+#       This program is distributed in the hope that it will be useful,
+#       but WITHOUT ANY WARRANTY; without even the implied warranty of
+#       MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#       GNU General Public License for more details.
+#
+#       You should have received a copy of the GNU General Public License along
+#       with this program.  If not, see http://www.gnu.org/licenses/gpl-3.0-standalone.html.
+#
+#**********************************************************************************************
+#
 # You can use the following typical commands in this file:
 #    make iso			-- to make the kernel file and build a bootable iso image
 #    make build			-- build the kernel only (used for tighter developmetn cycles)
@@ -27,6 +47,7 @@ ASM=nasm -felf64 -Isrc/ -Iinclude/
 LD=x86_64-elf-gcc -ffreestanding -O2 -nostdlib -z max-page-size=0x1000
 LD-SCRIPT=-T $(LINK-SCRIPT)
 LD-LIBS=-lgcc
+OBJCOPY=x86_64-elf-objcopy
 
 ASM-SRC=$(wildcard src/*.s)
 OBJ=$(sort $(subst .s,.o,$(subst src/,obj/,$(ASM-SRC))))
@@ -54,6 +75,7 @@ $(TGT-FILE): $(OBJ) $(LINK-SCRIPT) makefile
 	echo Linking $@...
 	mkdir -p bin
 	$(LD) $(LD-SCRIPT) -o $@ $(OBJ) $(LD-LIBS)
+	$(OBJCOPY) --only-keep-debug $@ $(subst .bin,.sym,$@) && chmod -x $(subst .bin,.sym,$@)
 
 obj/%.o: src/%.s src/*.inc makefile
 	echo Assembling $<...
