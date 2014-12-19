@@ -28,7 +28,7 @@
 ;**********************************************************************************************
 ;
 ;    Date     Tracker  Pgmr  Description
-; ----------  ------   ----  ------------------------------------------------------------------
+; ----------  -------  ----  ------------------------------------------------------------------
 ; 2014/09/24  Initial  ADCL  Leveraged from osdev.org -- "Higher Half Bare Bones" wiki
 ; 2014/09/25  Initial  ADCL  Since "Higher Half Bare Bones" did not work, scrapped it all for
 ;                            a run at "64-bit Higher Half Kernel with GRUB2.
@@ -542,13 +542,17 @@ StartHigherHalf:
                 call        PMMInit                 ; initialize the physical frames in PMM
                 call        PMMInit2                ; if more than 32GB memory, we to complete
                 call        HeapInit                ; initialize the heap
+                call        VMMInit                 ; complete init of vmm & get a stack
+                push        rax                     ; we need to save this stack for later
+
                 call        GDTInit                 ; initialize the final GDT and TSSs
-                call        VMMInit                 ; complete the init of the virtual mem mgr
+                call        IDTInit                 ; initialize the IDT
 
 ;----------------------------------------------------------------------------------------------
 ; we need to change the stack at the highest call level so we don't lose any return RIP values.
 ;----------------------------------------------------------------------------------------------
 
+                pop         rax                     ; get the stack address back
                 add.q       rax,STACK_SIZE          ; adjust to the top of the stack
                 mov.q       rbx,0x10                ; set the stack selector
                 mov.w       ss,bx                   ; set the ss reg
@@ -561,17 +565,24 @@ StartHigherHalf:
                 call        ReclaimMemory
 
 ;----------------------------------------------------------------------------------------------
+; Now, initialize the process structures and establish the idle process
+;----------------------------------------------------------------------------------------------
+
+                call        SchedulerInit
+                call        ProcessInit
+
+;----------------------------------------------------------------------------------------------
 ; Now for some testing....
 ;----------------------------------------------------------------------------------------------
 
-.test:
+.test:          sti
 
 ;----------------------------------------------------------------------------------------------
 ; Just die for now; more to come here
 ;----------------------------------------------------------------------------------------------
 
 .loop:
-                cli
+
                 hlt
                 jmp         .loop
 

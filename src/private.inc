@@ -84,7 +84,7 @@
 %define         sub.d       sub dword
 %define         sub.q       sub qword
 
-%define         test.q      test byte
+%define         test.b      test byte
 %define         test.w      test word
 %define         test.d      test dword
 %define         test.q      test qword
@@ -96,6 +96,88 @@
 
 %define         BREAK       xchg bx,bx
 
+;----------------------------------------------------------------------------------------------
+; -- some macros to make development easier
+;----------------------------------------------------------------------------------------------
+
+%macro          INT_HANDLER_PREAMBLE 0
+                push        rbp                     ; save the caller's frame (another stack)
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rax                     ; save rax
+                push        rbx                     ; save rbx
+                push        rcx                     ; save rcx
+                push        rdx                     ; save rdx
+                push        rsi                     ; save rsi
+                push        rdi                     ; save rdi
+                push        r8                      ; save r8
+                push        r9                      ; save r9
+                push        r10                     ; save r10
+                push        r11                     ; save r11
+                push        r12                     ; save r12
+                push        r13                     ; save r13
+                push        r14                     ; save r14
+                push        r15                     ; save r15
+
+                xor.q       rax,rax                 ; clear rax
+                mov.w       ax,ds                   ; copy ds to rax register
+                push        rax                     ; and save it on the stack
+
+                xor.q       rax,rax                 ; clear rax
+                mov.w       ax,es                   ; copy es to rax register
+                push        rax                     ; and save it on the stack
+
+                xor.q       rax,rax                 ; clear rax
+                mov.w       ax,fs                   ; copy fs to rax register
+                push        rax                     ; and save it on the stack
+
+                xor.q       rax,rax                 ; clear rax
+                mov.w       ax,gs                   ; copy gs to rax register
+                push        rax                     ; and save it on the stack
+
+                mov.q       rax,cr0                 ; get cr0
+                push        rax                     ; and save it on the stack
+
+                mov.q       rax,cr2                 ; get cr2
+                push        rax                     ; and save it on the stack
+
+                mov.q       rax,cr3                 ; get cr3
+                push        rax                     ; and save it on the stack
+
+                mov.q       rax,[rbp-16]            ; restore rax since we trashed it
+%endmacro
+
+%macro          INT_HANDLER_CLEANUP 0
+                add.q       rsp,24                  ; skip past cr3, cr2, and cr0
+
+                pop         rax                     ; get gs from the stack
+                mov.w       gs,ax                   ; and restore the register
+
+                pop         rax                     ; get fs from the stack
+                mov.w       fs,ax                   ; and restore the register
+
+                pop         rax                     ; get es from the stack
+                mov.w       es,ax                   ; and restore the register
+
+                pop         rax                     ; get ds from the stack
+                mov.w       ds,ax                   ; and restore the register
+
+                pop         r15                     ; restore r15
+                pop         r14                     ; restore r14
+                pop         r13                     ; restore r13
+                pop         r12                     ; restore r12
+                pop         r11                     ; restore r11
+                pop         r10                     ; restore r10
+                pop         r9                      ; restore r9
+                pop         r8                      ; restore r8
+                pop         rdi                     ; restore rdi
+                pop         rsi                     ; restore rsi
+                pop         rdx                     ; restore rdx
+                pop         rcx                     ; restore rcx
+                pop         rbx                     ; restore rbx
+                pop         rax                     ; restore rax
+                pop         rbp                     ; restore caller's frame
+                add.q       rsp,8                   ; clean up the error code on the stack
+%endmacro
 
 ;----------------------------------------------------------------------------------------------
 ; -- the following symbols are added by the linker
@@ -214,4 +296,141 @@ VMM_ERR_NOMEM   equ         0xffffffffffffffff
 %ifndef __GDT_TSS_S__
                 extern      GDTInit
 %endif
+
+;----------------------------------------------------------------------------------------------
+; -- the following symbols are found in idt.s
+;----------------------------------------------------------------------------------------------
+
+RSP0            equ         0x00                    ; use stack RSP0/1/2 based on DPL of gate
+IST1            equ         0x01                    ; use stack IST1
+IST2            equ         0x02                    ; use stack IST2
+IST3            equ         0x03                    ; use stack IST3
+IST4            equ         0x04                    ; use stack IST4
+IST5            equ         0x05                    ; use stack IST5
+IST6            equ         0x06                    ; use stack IST6
+IST7            equ         0x07                    ; use stack IST7
+
+%ifndef __IDT_S__
+                extern      IDTInit
+                extern      RegisterHandler
+%endif
+
+;----------------------------------------------------------------------------------------------
+; -- the following symbols are found in lists.s
+;----------------------------------------------------------------------------------------------
+
+;----------------------------------------------------------------------------------------------
+; This structure is the actual list structure.  In C, this would be implemented as a struct
+; with defines to help with initialization.  In NASM, this will be our responsibility to
+; initialize and maintain properly.
+;----------------------------------------------------------------------------------------------
+
+struc List
+    .prev       resq    1
+    .next       resq    1
+endstruc
+
+BADLISTPREV     equ         0xffffff7fffe00100
+BADLISTNEXT     equ         0xffffff7fffe00200
+
+%macro          InitializeList 1
+                mov.q       [%1+List.prev],%1       ; set .prev member to point to itself
+                mov.q       [%1+List.next],%1       ; set .next member to point to itself
+%endmacro
+
+%ifndef __LISTS_S__
+                extern      ListAddHead             ; for stacks
+                extern      ListAddTail             ; for queues
+                extern      ListDel
+                extern      ListDelInit
+                extern      ListNext
+                extern      ListEmpty
+%endif
+
+;----------------------------------------------------------------------------------------------
+; -- the following symbols are found in scheduler.s
+;----------------------------------------------------------------------------------------------
+
+%ifndef __SCHEDULER_S__
+                extern      SchedulerInit
+                extern      RdyKernQAdd
+                extern      RdyHighQAdd
+                extern      RdyNormQAdd
+                extern      RdyLowQAdd
+                extern      RdyIdleQAdd
+%endif
+
+;----------------------------------------------------------------------------------------------
+; -- the following symbols are found in process.s
+;----------------------------------------------------------------------------------------------
+
+;----------------------------------------------------------------------------------------------
+; These are the priorities that exist on the system.  These exist for 2 reasons:
+; 1) to indicate to the system which processes are a higher priority (and therefore which
+;    should get the CPU first).
+; 2) they also become the quantum that is offered each process before being preempted (unless
+;    the process blocks for some reason).
+;
+; There will be only 1 process with the PTY_IDLE priority per CPU: the idle process.  At least
+; 1 process must be ready to run on each processor at any given time.  When only the idle
+; process is ready, there will be a lot of possible context switches.  However, we should never
+; perform a context switch to the current process -- it's just a waste.
+;
+; On the other end, kernel threads and drivers will run at the PTY_KERN priority.  Though there
+; will be several driver threads, most of them will be in some kind of blocked state at any
+; given moment, so they will not slow the system down.
+;
+; Most processes will be at a PTY_NORM priority.
+;----------------------------------------------------------------------------------------------
+
+PTY_IDLE        equ         1                       ; idle jobs get a quantum of 1
+PTY_LOW         equ         5                       ; low priority jobs get a quantum of 5
+PTY_NORM        equ         10                      ; normal jobs get a quantum of 10
+PTY_HIGH        equ         20                      ; high priority jobs get a quantum of 20
+PTY_KERN        equ         30                      ; kernel/drivers get a quantum of 30
+
+;----------------------------------------------------------------------------------------------
+; The Process structure is at the core of managing the work that is allowed to run on a CPU.
+; Since the OS will preempt a process to replace it with another process (and the timer IRQ
+; will have a different stack than the process), we will need to save all the registers in
+; this structure as well.  Finally, there will be a global process list and the process can
+; belong to one of several status queues.
+;----------------------------------------------------------------------------------------------
+
+PROC_NAME_LEN   equ         32
+
+struc           Process
+    .pid        resq        1                       ; Process ID by which it is known gloablly
+    .name       resb        PROC_NAME_LEN           ; the name of the process when asked
+    .totQtm     resq        1                       ; This is the total quantum used
+    .procSts    resb        1                       ; This is the process status if executing
+    .procPty    resb        1                       ; this is the process pty (see above)
+    .quantum    resb        1                       ; quantum remaining in the timeslice
+    .fill       resb        1                       ; aligning...
+    .stackAddr  resq        1                       ; this is the stack address
+    .ss         resq        1                       ; this is the saved ss register
+    .rsp        resq        1                       ; saved rsp register
+    .cr3        resq        1                       ; saved cr3 register -- proc specific PML4
+    .glbl:                                          ; offset of the Global Process List struct
+    .glbl.prev  resq        1                       ; List.prev
+    .glbl.next  resq        1                       ; List.next
+    .stsQ:                                          ; offset of the Status List struct
+    .stsQ.prev  resq        1                       ; List.prev
+    .stsQ.next  resq        1                       ; List.next
+endstruc
+
+%ifndef __PROCESS_S__
+                extern      currentProcess
+
+                extern      ProcessInit
+                extern      ProcessResetQtm
+
+                extern      ReadyProcess
+%endif
+
+;----------------------------------------------------------------------------------------------
+; -- the following symbols are found in debugger.s
+;----------------------------------------------------------------------------------------------
+
+                extern      debugger
 

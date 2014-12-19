@@ -71,7 +71,7 @@
 ; The following functions are internal functions:
 ;
 ;    Date     Tracker  Pgmr  Description
-; ----------  ------   ----  ------------------------------------------------------------------
+; ----------  -------  ----  ------------------------------------------------------------------
 ; 2014/11/30  Initial  ADCL  Initial code
 ;
 ;==============================================================================================
@@ -373,12 +373,12 @@ TSSInit:
 
                 call        GetCPUCount             ; get the CPU count on the system
                 add.q       rax,TSS_ADDL            ; rax holds the CPU count; add in any add'l
+                mov.q       rdx,rax                 ; save this final count for later
 
                 test.q      rax,0x001f              ; do we have any partial pages?
                 jz          .countOK                ; if an even break, jump over the adj
 
                 add.q       rax,TSS_PER_PAGE        ; round out page so we can truncate
-                mov.q       rdx,rax                 ; save this final count for later
 
 .countOK:       shr.q       rax,5                   ; get the number of pages we want
 
@@ -391,11 +391,11 @@ TSSInit:
                 push        rax                     ; push the address
                 call        VMMAlloc                ; get the pages
 
+                add.q       rsp,8                   ; remove the virtual address from stack
+                pop         rcx                     ; we need our page count back, but in rcx
+
                 cmp.q       rax,VMM_ERR_NOMEM       ; did we have a problem?
                 je          .out                    ; exit for now; do something better later
-
-                add.q       rsp,8                   ; remove the virtual address from stack
-                pop         rcx                     ; we need our page count back
 
 ;----------------------------------------------------------------------------------------------
 ; so, with the information we have now, let's populate the management structure
@@ -473,7 +473,7 @@ NewTSS:
                 shl.q       rcx,7                   ; multiply by 128 to get bytes
                 mov.q       rbx,[r9+TSSCtrl.pages]  ; get the starting address
                 add.q       [r9+TSSCtrl.curIdx],1   ; increment the current count
-                mov.q       rbx,[rbx+rcx]           ; get the address of the TSS
+                add.q       rbx,rcx                 ; get the address of the TSS
 
 ;----------------------------------------------------------------------------------------------
 ; for good measure, let's clear the TSS

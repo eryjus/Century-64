@@ -120,7 +120,7 @@
 
 ;==============================================================================================
 ; In this first section (before we get into any real data or code), we will define some
-; constants and suce to make out coding easier.
+; constants and such to make out coding easier.
 ;==============================================================================================
 
 ALLOC_MULT      equ     8
@@ -284,6 +284,7 @@ mrLHdrMagic     db          '                 In MergeRight(), Left header magic
 kmalloc:
                 push        rbp                     ; save the caller's frame
                 mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
                 push        rcx                     ; save rcx -- number of bytes requested
                 push        rsi                     ; save rsi -- header pointer
                 push        r10                     ; work reg for allocating more memory
@@ -447,7 +448,7 @@ kmalloc:
 
 .gotOne:        mov.q       rsi,rax                 ; save our header; rax will be used for calc
                 mov.q       rax,rcx                 ; get our adjusted size
-                sub.q       rax,[rbx+KHeapHdr.size] ; determine the difference in sizes
+                sub.q       rax,[rsi+KHeapHdr.size] ; determine the difference in sizes
                 cmp.q       rax,ALLOC_MIN_BLK       ; is the leftover size enough to split blk?
                 jbe         .noSplit                ; if small enough, we will not split it
 
@@ -497,6 +498,7 @@ kmalloc:
                 pop         r10                     ; restore r10
                 pop         rsi                     ; restore rsi
                 pop         rcx                     ; restore rcx
+                pop         rbx                     ; restore rbx
                 pop         rbp                     ; restore caller's frame
                 ret
 
@@ -2057,7 +2059,7 @@ kHeapError:
                 mov.q       rbp,rsp         ; create our own frame; we dont ret -- save no regs
                 sub.q       rsp,64          ; make room for 8 parameters for function calls
 
-                mov.q       [rsp],0x0c      ; set the color: white on red
+                mov.q       [rsp],0x0c      ; set the color: red on black
                 call        TextSetAttr     ; set the attribute color
                 call        TextClear       ; clear the screen to a red color
 

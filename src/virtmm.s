@@ -1246,30 +1246,15 @@ AllocStack:
                 xor.q       rax,rax                 ; clear rax
                 mov.q       rcx,STACK_BM_SIZE>>3    ; get the number of qwords to look through
 
-                repz        scasq                   ; scan the bitmap for a free stack
+.search:        cmp.q       [rdi],0                 ; are all the stacks used?
+                jne         .found                  ; we have a free stack
+
+                add.q       rdi,8                   ; move to the next qword
+                loop        .search                 ; search some more
 
 ;----------------------------------------------------------------------------------------------
-; the above statement is significant in that there are 2 termination conditions that can bring
-; us to this point:
-; 1) rcx == 0
-; 2) qword ptr [rdi] <> 0
-;
-; we need to determine which has caused us to get here.  If rcx is 0, then we need to check the
-; last qword of the bitmap to make see if we have a free stack.
-;
-; When we have no free stack, we will return 0.
-;
-; When we have a free stack, rcx will need to be used to determine the qword offset that holds
-; the free bit.  Remember that a 1 means free and a 0 means used.
+; We have no free stack, we will return 0.
 ;----------------------------------------------------------------------------------------------
-
-                cmp.q       rcx,0                   ; did we find a free stack?
-                jne         .found                  ; if not 0, we KNOW we found a block
-
-                mov.q       rax,STACK_BM_SIZE>>3    ; get the number of qwords in the bitmap
-                dec         rax                     ; sub 1 to get the proper qword offset
-                cmp.q       [rbx+rax],0             ; is the last byte fully allocated
-                jne         .found                  ; if not, we found a block
 
 .none:          xor.q       rax,rax                 ; clear the return value
                 jmp         .out                    ; no more room; return 0
@@ -1288,7 +1273,7 @@ AllocStack:
                 sub.q       rcx,rax                 ; rcx now holds the byte offset into bmap
 
                 mov.q       rax,[rbx+rcx]           ; get the qword in question; some bit is 1
-                mov.q       rcx,rdx                 ; move the qword offset
+                mov.q       rdx,rcx                 ; move the qword offset
                 xor.q       rcx,rcx                 ; clear rcx
 
 ;----------------------------------------------------------------------------------------------
