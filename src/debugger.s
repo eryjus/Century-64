@@ -981,7 +981,7 @@ dbgBasicScreen:
 .stackLoop:     cmp         rcx,3                   ; have we passed row 3
                 jb          .exit                   ; if so, exit
 
-                cmp         rdi,0                   ; have we set BottomOfStack flag?
+                cmp         rdx,0                   ; have we set BottomOfStack flag?
                 jnz         .prtBOS                 ; go print bottom of stack
 
                 mov         rax,rsi                 ; get user stack pointer in working reg

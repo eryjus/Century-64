@@ -105,9 +105,9 @@ TSS_LIMIT       equ         103                     ; == 104 - 1 (the size of th
 ;----------------------------------------------------------------------------------------------
 
 KCODE_FLAGS     equ         0xa09a          ; (G d/b L avl) ... (P DPL=0 S) (Code/Exec/Rd)
-KDATA_FLAGS     equ         0xa092          ; (G d/b L avl) ... (P DPL=0 S) (Data/Wr/Rd)
+KDATA_FLAGS     equ         0x8092          ; (G d/b L avl) ... (P DPL=0 S) (Data/Wr/Rd)
 UCODE_FLAGS     equ         0xa0fa          ; (G d/b L avl) ... (P DPL=3 S) (Code/Exec/Rd)
-UDATA_FLAGS     equ         0xa0f2          ; (G d/b L avl) ... (P DPL=3 S) (Data/Wr/Rd)
+UDATA_FLAGS     equ         0x80f2          ; (G d/b L avl) ... (P DPL=3 S) (Data/Wr/Rd)
 
 ;----------------------------------------------------------------------------------------------
 ; The TSS structure is used to provide offsets for each of the data members.
@@ -574,7 +574,8 @@ NewTSSEntry:
                 xor.q       rdx,rdx                 ; clear rdx
 
 ;----------------------------------------------------------------------------------------------
-; rdx is easy...  let's start with the top 32 bits of the base address
+; rdx is easy...  the top 32 bits are clear and the bottom 32 bits are the upper 32 bits of the
+; base address.  rdx was cleared above, so no need to address that.
 ;----------------------------------------------------------------------------------------------
 
                 mov.q       rcx,[rbp+16]            ; get the address
@@ -585,14 +586,17 @@ NewTSSEntry:
 
 ;----------------------------------------------------------------------------------------------
 ; now, rax.  we start with the upper 32 bits, which we will build in the lower 32 bits
-; and then shift up.
+; and then shift up.  The upper portion of this register is setup to include bits of the base
+; address, the limit, and a bunch of flags.  For now, the limit is less that 65535 bytes, so
+; this will effectively be 0 (and will need to be addressed when we get a TSS bigger than 65535
+; bytes).  The result will be stored in rax, which is cleared already
 ;----------------------------------------------------------------------------------------------
 
                 mov.q       rcx,[rbp+16]            ; get the address again
-                mov.q       rbx,0x00000000ff000000  ; set the bit mask
+                mov.q       rbx,0x00000000ff000000  ; set the bit mask: bits 31:24 of addr
                 and.q       rcx,rbx                 ; mask out those bits
-                or.q        rax,rcx                 ; move that into rax
-                or.q        rax,0x0000000000908900  ; set the flags for the TSS
+                mov.q       rax,rcx                 ; move that into rax
+                or.q        rax,0x0000000000808900  ; set the flags for the TSS
 
                 mov.q       rcx,[rbp+16]            ; get the address again
                 shr.q       rcx,16                  ; we want bits 16-23
@@ -600,6 +604,10 @@ NewTSSEntry:
                 or.q        rax,rcx                 ; move them into the rax reg
 
                 shl.q       rax,32                  ; move to the upper bits
+
+;----------------------------------------------------------------------------------------------
+; now we build the lower 32 bits of the TSS entry, which is somewhat simple
+;----------------------------------------------------------------------------------------------
 
                 mov.q       rcx,[rbp+16]            ; get the address again
                 and.q       rcx,0x000000000000ffff  ; mask out lower 16 bits

@@ -93,6 +93,7 @@
 ;                            needed.  Remove that GDT and replace it with a call to GDTInit.
 ;                            In addition, some general cleanup of unnecessary calls.
 ; 2014/12/02  #217     ADCL  Relocated the paging clean into a function in virtmm.s.
+; 2014/12/23  #205     ADCL  Added initailization for the Debugging Console (COM1).
 ;
 ;==============================================================================================
 
@@ -526,6 +527,9 @@ StartHigherHalf:
 ;----------------------------------------------------------------------------------------------
 ; Print the banner text
 ;----------------------------------------------------------------------------------------------
+%ifndef DISABLE_DBG_CONSOLE
+                call        DbgConsoleInit
+%endif
 
                 call        TextSetBlockCursor      ; create a block cursor
                 call        TextClear               ; clear the screen
@@ -568,6 +572,7 @@ StartHigherHalf:
 ; Now, initialize the process structures and establish the idle process
 ;----------------------------------------------------------------------------------------------
 
+                call        SpurInit                ; initialize the Spurious Interrupt Handler
                 call        SchedulerInit
                 call        ProcessInit
 
@@ -577,6 +582,23 @@ StartHigherHalf:
 
 .test:          sti
 
+                push        0
+                mov.q       rax,testProcA
+                push        rax
+                mov.q       rax,textProcA
+                push        rax
+                call        CreateProcess
+                add.q       rsp,24
+
+
+                push        0
+                mov.q       rax,testProcB
+                push        rax
+                mov.q       rax,textProcB
+                push        rax
+                call        CreateProcess
+                add.q       rsp,24
+
 ;----------------------------------------------------------------------------------------------
 ; Just die for now; more to come here
 ;----------------------------------------------------------------------------------------------
@@ -585,6 +607,17 @@ StartHigherHalf:
 
                 hlt
                 jmp         .loop
+
+
+
+testProcA:      push        'A'
+.loop:          call        TextPutChar
+                jmp         .loop
+
+testProcB:      push        'B'
+.loop:          call        TextPutChar
+                jmp         .loop
+
 
 ;==============================================================================================
 ; The .rodata segment will hold all data related to the kernel
@@ -599,7 +632,12 @@ HelloString:
                 db          "-------- _`\<,_    _`\<,_    _`\<,_    _`\<,_",13
                 db          "------- (*)/ (*)  (*)/ (*)  (*)/ (*)  (*)/ (*)",13
                 db          "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",13
-                db          "   ... speed is good!",13,13,13,13,13,13,13,13,13,13,13
+                db          "   ... speed is good!",13,13,
+%ifndef DISABLE_DBG_CONSOLE
+                db          "Debugging log enabled on COM1 (19200-8-N-1)"
+%endif
+                db          13,
+                db          13,13,13,13,13,13,13,13
                 db          "               Century-64  Copyright (C) 2014  Adam Scott Clark",13,13
                 db          "This program comes with ABSOLUTELY NO WARRANTY.  This is free software, and you",13
                 db          "are welcome to redistribute it under certain conditions.  For more information,",13
@@ -607,3 +645,6 @@ HelloString:
 
 kHeapMsg:
                 db          '                     This is a test kHeap error message',0
+
+textProcA       db          'testProcA',0
+textProcB       db          'testProcB',0

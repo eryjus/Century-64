@@ -32,6 +32,7 @@
 #    Date     Tracker  Pgmr  Description
 # ----------  ------   ----  ------------------------------------------------------------------
 # 2014/09/24  Initial  ADCL  Initial vesion
+# 2014/12/24  #205     ADCL  Clear the serial.log file (and touch a 0-byte new one).
 #
 #==============================================================================================
 
@@ -40,6 +41,8 @@ TGT-BLD=century-64.bin
 TGT-FILE=$(TGT-DIR)/$(TGT-BLD)
 TGT-ISO=$(subst .bin,.iso,$(TGT-BLD))
 TGT-CDROM=$(TGT-DIR)/$(TGT-ISO)
+
+SERIAL-LOG=$(TGT-DIR)/serial.log
 
 LINK-SCRIPT=linker.ld
 
@@ -76,6 +79,8 @@ $(TGT-FILE): $(OBJ) $(LINK-SCRIPT) makefile
 	mkdir -p bin
 	$(LD) $(LD-SCRIPT) -o $@ $(OBJ) $(LD-LIBS)
 	$(OBJCOPY) --only-keep-debug $@ $(subst .bin,.sym,$@) && chmod -x $(subst .bin,.sym,$@)
+	rm -f $(SERIAL-LOG)
+	touch $(SERIAL-LOG)
 
 obj/%.o: src/%.s src/*.inc makefile
 	echo Assembling $<...

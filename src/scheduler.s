@@ -287,70 +287,22 @@ SchedulerInit:
                 mov.q       [rbx+Scheduler.stackPtr],rax    ; set it in the struct
 
 ;----------------------------------------------------------------------------------------------
-; reprogram the 8259 PIC to set the proper IRQ numbers
+; initialize the PIC
 ;----------------------------------------------------------------------------------------------
 
-                mov.b       al,0x11                 ; set the byte to output
-                out         0x20,al                 ; initialize the master PIC
-                nop                                 ; force some time to pass
-                nop                                 ; force some time to pass
+                call        picInit                 ; Initialize the 8259 PIC
 
-                mov.b       al,0x11                 ; set the byte to output
-                out         0xa0,al                 ; initialize the slave PIC
-                nop                                 ; force some time to pass
-                nop                                 ; force some time to pass
+                mov.b       al,0x36                 ; we want to program the clock frequency
+                out         0x43,al                 ; send the request to the PIT
 
-                mov.b       al,0x20                 ; set the byte to output
-                out         0x21,al                 ; we want IRQ0 to be on interrupt 0x20
-                nop                                 ; force some time to pass
-                nop                                 ; force some time to pass
+                mov.b       al,0x52                 ; send the low byte to the PIT
+                out         0x40,al                 ; send it
 
-                mov.b       al,0x28                 ; set the byte to output
-                out         0xa1,al                 ; we want IRQ8 to be on int 0x28
-                nop                                 ; force some time to pass
-                nop                                 ; force some time to pass
-
-                mov.b       al,0x04                 ; set the master to have the slave on IRQ2
-                out         0x21,al                 ; we want IRQ0 to be on interrupt 0x20
-                nop                                 ; force some time to pass
-                nop                                 ; force some time to pass
-
-                mov.b       al,0x02                 ; set the slave to use IRQ2
-                out         0xa1,al                 ; we want IRQ8 to be on int 0x28
-                nop                                 ; force some time to pass
-                nop                                 ; force some time to pass
-
-                mov.b       al,0x01                 ; use 8086 mode
-                out         0x21,al                 ; we want IRQ0 to be on interrupt 0x20
-                nop                                 ; force some time to pass
-                nop                                 ; force some time to pass
-
-                mov.b       al,0x01                 ; use 8086 mode
-                out         0xa1,al                 ; we want IRQ8 to be on int 0x28
-                nop                                 ; force some time to pass
-                nop                                 ; force some time to pass
-
-                mov.b       al,0x00                 ; use 8086 mode
-                out         0x21,al                 ; we want IRQ0 to be on interrupt 0x20
-                nop                                 ; force some time to pass
-                nop                                 ; force some time to pass
-
-                mov.b       al,0x00                 ; use 8086 mode
-                out         0xa1,al                 ; we want IRQ8 to be on int 0x28
-                nop                                 ; force some time to pass
-                nop                                 ; force some time to pass
-
-                mov.b       al,0x36
-                out         0x43,al
-
-                mov.b       al,0x52
-                out         0x40,al
-
-                mov.b       al,0x09
-                out         0x40,al
+                mov.b       al,0x09                 ; send the high byte to the PIT
+                out         0x40,al                 ; send it
 
 ;----------------------------------------------------------------------------------------------
-; now, install the IRQ0 handler
+; now, install the IRQ0 handler and enable the IRQ
 ;----------------------------------------------------------------------------------------------
 
                 mov.q       rax,IST2                ; we want IST2
@@ -360,6 +312,12 @@ SchedulerInit:
                 push        0x20                    ; finally we want interrupt 0x20
                 call        RegisterHandler         ; now, regoster our IRQ handler
                 add.q       rsp,24                  ; clean up the stack
+
+                push        0                       ; we will enable irq 0
+                mov.q       rax,pic                 ; get the pic structure address
+                mov.q       rax,[rax+PIC.enableIRQ] ; get the function to enable an IRQ
+                call        rax                     ; call the function
+                add.q       rsp,8                   ; clean up the stack
 
 ;----------------------------------------------------------------------------------------------
 ; clean up and exit
@@ -568,8 +526,11 @@ SwitchToProcess:
                 cmp.q       rcx,0                   ; are we skipping eoi?
                 je          .out                    ; if so, go straight to exit
 
-.eoi:           mov.b       al,0x20                 ; this is the EOI code
-                out         0x20,al                 ; send the EOI to the PIC
+.eoi:           mov.q       rax,pic                 ; get the pic strucutre
+                mov.q       rax,[rax+PIC.eoi]       ; get the address of the eoi function
+                push        0                       ; perform EOI for IRQ0
+                call        rax                     ; do the eoi
+                add.q       rsp,8                   ; clean up the stack
 
 ;----------------------------------------------------------------------------------------------
 ; At this point, we will return to the TSwapTgt to restore the registers and finally return to
@@ -603,7 +564,8 @@ GetNextProcess:
 
                 mov.q       rbx,sched               ; get the scheduler struct address
 
-                mov.q       rax,currentProcess      ; get the address for the current Process
+                mov.q       rax,currentProcess      ; get the address for the current Proc var
+                mov.q       rax,[rax]               ; get the contents, the addr of Proc struct
                 xor.q       rcx,rcx                 ; clear rcx
                 mov.b       cl,[rax+Process.procPty]; get the process priority
 
@@ -615,7 +577,8 @@ GetNextProcess:
 ; currentProcess priority against the scheduler
 ;----------------------------------------------------------------------------------------------
 
-.kern:          mov.q       rax,[rbx+Scheduler.rdyKern] ; get the list for kernel priority
+.kern:          lea.q       rax,[rbx+Scheduler.rdyKern] ; get the list for kernel priority
+                push        rax                     ; push the address on the stack
                 call        ListNext                ; get the next entry, 0 if none
                 add.q       rsp,8                   ; clean up the stack
 
@@ -635,7 +598,8 @@ GetNextProcess:
 .high:          cmp.b       cl,PTY_KERN             ; is the running process a kernel pty?
                 je          .default                ; return the currentProcess
 
-                mov.q       rax,[rbx+Scheduler.rdyHigh] ; get the list for high priority
+                lea.q       rax,[rbx+Scheduler.rdyHigh] ; get the list for high priority
+                push        rax                     ; push the address on the stack
                 call        ListNext                ; get the next entry, 0 if none
                 add.q       rsp,8                   ; clean up the stack
 
@@ -655,7 +619,8 @@ GetNextProcess:
 .norm:          cmp.b       cl,PTY_HIGH             ; is the running process a high pty?
                 je          .default                ; return the currentProcess
 
-                mov.q       rax,[rbx+Scheduler.rdyNorm] ; get the list for normal priority
+                lea.q       rax,[rbx+Scheduler.rdyNorm] ; get the list for normal priority
+                push        rax                     ; push the address on the stack
                 call        ListNext                ; get the next entry, 0 if none
                 add.q       rsp,8                   ; clean up the stack
 
@@ -673,7 +638,8 @@ GetNextProcess:
 .low:           cmp.b       cl,PTY_NORM             ; is the running process a normal pty?
                 je          .default                ; return the currentProcess
 
-                mov.q       rax,[rbx+Scheduler.rdyLow] ; get the list for low priority
+                lea.q       rax,[rbx+Scheduler.rdyLow] ; get the list for low priority
+                push        rax                     ; push the address on the stack
                 call        ListNext                ; get the next entry, 0 if none
                 add.q       rsp,8                   ; clean up the stack
 
@@ -692,12 +658,13 @@ GetNextProcess:
 .idle:          cmp.b       cl,PTY_LOW              ; is the running process a low pty?
                 je          .default                ; return the currentProcess
 
-                mov.q       rax,[rbx+Scheduler.rdyIdle] ; get the list for kernel priority
+                lea.q       rax,[rbx+Scheduler.rdyIdle] ; get the list for kernel priority
+                push        rax                     ; push the address on the stack
                 call        ListNext                ; get the next entry, 0 if none
                 add.q       rsp,8                   ; clean up the stack
 
                 cmp.q       rax,0                   ; 0 means the queue was empty
-                je          .high                   ; <> 1 means we have an empty queue
+                je          .default                ; <> 1 means we have an empty queue
 
                 jmp         .out                    ; we found something, return it
 
@@ -714,8 +681,8 @@ GetNextProcess:
 
 .out:
                 pop         r9                      ; restore r9
-                pop         rbx                     ; restore rbx
                 pop         rcx                     ; restore rcx
+                pop         rbx                     ; restore rbx
                 pop         rbp                     ; restore caller's frame
                 ret
 
@@ -760,11 +727,12 @@ IRQ0Handler:
 ; Now, some housekeeping for the running process
 ;----------------------------------------------------------------------------------------------
 
-                mov.q       rbx,currentProcess      ; get the running process address
+                mov.q       rbx,currentProcess      ; get the running process address var
+                mov.q       rbx,[rbx]               ; get the current proc struct addr
                 inc         qword [rbx+Process.totQtm]  ; increment the quantum
-                dec         qword [rbx+Process.quantum] ; one less quantum left
+                dec         byte [rbx+Process.quantum]  ; one less quantum left
 
-                cmp.q       [rbx+Process.quantum],0 ; has time run out?
+                cmp.b       [rbx+Process.quantum],0 ; has time run out?
                 jg          .eoi                    ; if not, exit
 
 ;----------------------------------------------------------------------------------------------
@@ -774,11 +742,46 @@ IRQ0Handler:
 ; task.
 ;----------------------------------------------------------------------------------------------
 
+%ifndef DISABLE_DBG_CONSOLE
+                push        rax                     ; save rax
+                mov.q       rax,qtmExpired          ; get the text to write
+                push        rax                     ; push it on the stack
+                call        DbgConsolePutString     ; write it to the debug console
+                add.q       rsp,8                   ; clean up the stack
+                pop         rax                     ; restore rax
+%endif
+
                 call        GetNextProcess          ; get the next process structure addr
                 cmp.q       rax,rbx                 ; are they the same?
                 jne         .swap                   ; if not the same, we will swap tasks
 
+%ifndef DISABLE_DBG_CONSOLE
+                push        rax                     ; save rax
+                mov.q       rax,resettingQtm        ; get the var address for the current proc
+                push        rax                     ; push the name on the stack
+                call        DbgConsolePutString     ; put the name to the debug console
+                add.q       rsp,8                   ; clean up the stack
+                pop         rax                     ; restore rax
+%endif
+
+                push        rax                     ; push the process to reset
                 call        ProcessResetQtm         ; reset the quantum
+                add.q       rsp,8                   ; clean up the stack
+
+%ifndef DISABLE_DBG_CONSOLE
+                push        rax                     ; save rax
+                mov.q       rax,currentProcess      ; get the var address for the current proc
+                mov.q       rax,[rax]               ; get the proc structure address
+                lea.q       rax,[rax+Process.name]  ; get the name
+                push        rax                     ; push the name on the stack
+                call        DbgConsolePutString     ; put the name to the debug console
+                mov.q       rax,hasControl          ; get the rest of the string
+                mov.q       [rsp],rax               ; put that string on the stack
+                call        DbgConsolePutString     ; put the name to the debug console
+                add.q       rsp,8                   ; clean up the stack
+                pop         rax                     ; restore rax
+%endif
+
                 jmp         .eoi                    ; jump to issue EOI
 
 ;----------------------------------------------------------------------------------------------
@@ -787,24 +790,32 @@ IRQ0Handler:
 ; process's paging tables.
 ;----------------------------------------------------------------------------------------------
 
-.swap:          mov.q       rsi,rax                 ; save the target process structure
+.swap:
+                mov.q       rsi,rax                 ; save the target process structure
 
-                mov.q       rdi,[rbp+40]            ; get the user stack pointer
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,swapStart           ; get the address of the message
+                push        rax                     ; push it on the stack
+                call        DbgConsolePutString     ; write it to the screen
+                add.q       rsp,8                   ; clean up the stack
+%endif
+
+                mov.q       rdi,[rbp+32]            ; get the user stack pointer
                 sub.q       rdi,200                 ; make room for the registers
 
-                mov.q       rax,[rbp+48]            ; get SS from the IST2 stack
+                mov.q       rax,[rbp+40]            ; get SS from the IST2 stack
                 mov.q       [rdi+192],rax           ; set SS into the user stack
 
-                mov.q       rax,[rbp+40]            ; get RSP from the IST2 stack
+                mov.q       rax,[rbp+32]            ; get RSP from the IST2 stack
                 mov.q       [rdi+184],rax           ; set RSP into the user stack
 
-                mov.q       rax,[rbp+32]            ; get the RFLAGS from the IST2 stack
+                mov.q       rax,[rbp+24]            ; get the RFLAGS from the IST2 stack
                 mov.q       [rdi+176],rax           ; set RFLAGS into the user stack
 
-                mov.q       rax,[rbp+24]            ; get the CS from the IST2 stack
+                mov.q       rax,[rbp+16]            ; get the CS from the IST2 stack
                 mov.q       [rdi+168],rax           ; set the CS into the user stack
 
-                mov.q       rax,[rbp+16]            ; get RIP from the IST2 stack
+                mov.q       rax,[rbp+8]             ; get RIP from the IST2 stack
                 mov.q       [rdi+160],rax           ; set RIP into the user stack
 
                 mov.q       rax,[rbp]               ; get RBP from the IST2 stack
@@ -854,7 +865,7 @@ IRQ0Handler:
 ; Nearly there.  Now we need to save the state of the CR3, SS, and RSP in the process structure
 ;----------------------------------------------------------------------------------------------
 
-                mov.q       rax,[rbp+48]            ; get SS from the IST2 stack
+                mov.q       rax,[rbp+40]            ; get SS from the IST2 stack
                 mov.q       [rbx+Process.ss],rax    ; set SS into the Process structure
 
                 mov.q       rax,cr3                 ; get CR3
@@ -886,8 +897,21 @@ IRQ0Handler:
 ; the APIC driver -- not sure how we will accomplish this yet.
 ;----------------------------------------------------------------------------------------------
 
-.eoi:           mov.b       al,0x20                 ; this is the EOI code
-                out         0x20,al                 ; send the EOI to the PIC
+.eoi:
+%if 0
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,eoiStart            ; get the address of the message
+                push        rax                     ; push it on the stack
+                call        DbgConsolePutString     ; write it to the screen
+                add.q       rsp,8                   ; clean up the stack
+%endif
+%endif
+
+                push        0                       ; we need to ackowledge EOI for IRQ 0
+                mov.q       rax,pic                 ; get the pic structure address
+                mov.q       rax,[rax+PIC.eoi]       ; get the function to call
+                call        rax                     ; call the eoi function
+                add.q       rsp,8                   ; clean up the stack
 
 ;----------------------------------------------------------------------------------------------
 ; clean up and return from the interrupt
@@ -914,7 +938,21 @@ IRQ0Handler:
 ; code, we will likely have a priveledge change.
 ;----------------------------------------------------------------------------------------------
 
+                global      TSwapTgt
+
 TSwapTgt:
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,currentProcess      ; get the var address for the current proc
+                mov.q       rax,[rax]               ; get the proc structure address
+                lea.q       rax,[rax+Process.name]  ; get the name
+                push        rax                     ; push the name on the stack
+                call        DbgConsolePutString     ; put the name to the debug console
+                mov.q       rax,hasControl          ; get the rest of the string
+                mov.q       [rsp],rax               ; put that string on the stack
+                call        DbgConsolePutString     ; put the name to the debug console
+                add.q       rsp,8                   ; clean up the stack
+%endif
+
                 pop         rax                     ; restore GS from the stack
                 mov.w       gs,ax                   ; set the value
 
@@ -946,3 +984,17 @@ TSwapTgt:
                 iretq                               ; return to user-land
 
 ;==============================================================================================
+
+;==============================================================================================
+; The .rodata segment will hold all data related to the kernel
+;==============================================================================================
+
+                section     .rodata
+
+%ifndef DISABLE_DBG_CONSOLE
+hasControl      db          ' has CPU control',13,0
+eoiStart        db          'Sending EOI to PIC',13,0
+swapStart       db          'Beginning process swap',13,0
+qtmExpired      db          'Quantum Expired',13,0
+resettingQtm    db          'Resetting Quantum',13,0
+%endif

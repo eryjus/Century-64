@@ -377,8 +377,8 @@ ListDel:
 ; remove the entry from the list
 ;----------------------------------------------------------------------------------------------
 
-.good:          push        qword [rbx+List.prev]   ; push the prev address
-                push        qword [rbx+List.next]   ; push the next address
+.good:          push        qword [rbx+List.next]   ; push the next address
+                push        qword [rbx+List.prev]   ; push the prev address
                 call        __list_del              ; call the worker function
                 add.q       rsp,16                  ; clean up the stack
 
@@ -464,7 +464,7 @@ ListNext:
 
 .good:          mov.q       rax,[rbp+16]            ; get the head param
                 push        qword [rax+List.next]   ; push the parm on the stack
-                call        ListDel                 ; remove it from the list
+                call        ListDelInit             ; remove it from the list and init vals
                 pop         rax                     ; clean up the stack & set return val
 
 ;----------------------------------------------------------------------------------------------
@@ -479,6 +479,8 @@ ListNext:
 ;----------------------------------------------------------------------------------------------
 ; qword ListEmpty(qword listHead) -- returns 1 if the list is empty, 0 if it is not empty
 ;----------------------------------------------------------------------------------------------
+
+                global      ListEmpty
 
 ListEmpty:
                 push        rbp                     ; save caller's frame

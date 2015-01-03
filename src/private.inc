@@ -406,7 +406,7 @@ struc           Process
     .procSts    resb        1                       ; This is the process status if executing
     .procPty    resb        1                       ; this is the process pty (see above)
     .quantum    resb        1                       ; quantum remaining in the timeslice
-    .fill       resb        1                       ; aligning...
+    .fill       resb        5                       ; aligning...
     .stackAddr  resq        1                       ; this is the stack address
     .ss         resq        1                       ; this is the saved ss register
     .rsp        resq        1                       ; saved rsp register
@@ -425,7 +425,57 @@ endstruc
                 extern      ProcessInit
                 extern      ProcessResetQtm
 
+                extern      CreateProcess
                 extern      ReadyProcess
+%endif
+
+;----------------------------------------------------------------------------------------------
+; -- the following symbols are found in pic.s
+;----------------------------------------------------------------------------------------------
+
+;----------------------------------------------------------------------------------------------
+; The following structure will provide the abstraction for the 8259 PIC (Programmible Interrupt
+; controller.  We will need this abstraction as we will determine if an IOAPIC (I/O Advanced
+; Programmable Interrupt Controller) and replace the PIC-specific functions with IOAPIC-
+; specific functions if the IOAPIC exists.  Therefore, depending on what you want to
+; accomplish, simply call the functions stored in this structure and you will get the proper
+; address of the function call.
+;----------------------------------------------------------------------------------------------
+
+struc           PIC
+    .enableAll  resq        1                       ; function to enable all IRQs
+    .disableAll resq        1                       ; function to disable all IRQs
+    .enableIRQ  resq        1                       ; function to enable an IRQ
+    .disableIRQ resq        1                       ; function to disable an IRQ
+    .eoi        resq        1                       ; function to send an end of interrupt
+    .readISR    resq        1                       ; function to read In-Service Reg (ISR)
+    .readIRR    resq        1                       ; function to read Int Request Reg (IRR)
+endstruc
+
+%ifndef __PIC_S__
+                extern      pic                     ; the pic structure
+
+                extern      picInit                 ; Initialize the PIC
+%endif
+
+;----------------------------------------------------------------------------------------------
+; -- the following symbols are found in spur.s
+;----------------------------------------------------------------------------------------------
+
+%ifndef __SPUR_S__
+                extern      SpurInit                ; Initialize the spurious interrupt handler
+%endif
+
+;----------------------------------------------------------------------------------------------
+; -- the following symbols are found in dbg-console.s
+;----------------------------------------------------------------------------------------------
+
+%ifndef __DBG_CONSOLE_S__
+%ifndef DISABLE_DBG_CONSOLE
+                extern      DbgConsoleInit
+                extern      DbgConsolePutChar
+                extern      DbgConsolePutString
+%endif
 %endif
 
 ;----------------------------------------------------------------------------------------------

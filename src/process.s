@@ -61,6 +61,24 @@
 ;==============================================================================================
 
 ;----------------------------------------------------------------------------------------------
+; The uPush macro is used to simulate a push opcode on a register other than rsp.
+;
+;  !!!THIS MACRO TRASHES RAX!!!
+;----------------------------------------------------------------------------------------------
+
+%macro          uPush       2
+                sub.q       %1,8                    ; make room on the stack for a new value
+                mov.q       rax,%2                  ; get the value in rax
+                mov.q       [%1],rax                ; and put the value on the stack
+%endmacro
+
+;----------------------------------------------------------------------------------------------
+; This is the initial flags value for a process being started
+;----------------------------------------------------------------------------------------------
+
+PROC_FLAGS      equ         0x0000000000000202      ; interrupts enabled (and req'd bit 1 set)
+
+;----------------------------------------------------------------------------------------------
 ; Each of these statuses are used to indicate what the running process is really doing from the
 ; OS perspective (and potentially on which queue to find the process).
 ;----------------------------------------------------------------------------------------------
@@ -153,13 +171,22 @@ ProcessInit:
 ; Set some additional fields
 ;----------------------------------------------------------------------------------------------
 
-                mov.q       [rbx+Process.procSts],PROC_RUN  ; this is the running process!
+                mov.b       [rbx+Process.procSts],PROC_RUN  ; this is the running process!
+                mov.q       [rbx+Process.totQtm],0  ; clear total quantum
+                mov.b       [rbx+Process.procPty],PTY_IDLE  ; idle priority process
+                mov.b       [rbx+Process.quantum],0 ; clear total quantum
+                mov.q       [rbx+Process.stackAddr],0   ; stackAddr
+                mov.q       [rbx+Process.ss],0      ; ss
+                mov.q       [rbx+Process.rsp],0     ; rsp
 
 ;----------------------------------------------------------------------------------------------
 ; The rest of the fields will be populated on a process change
 ;
 ; Here we need to insert this process into the Global Process Queue
 ;----------------------------------------------------------------------------------------------
+
+                lea.q       rax,[rbx+Process.glbl]  ; get the address of the queue head
+                InitializeList      rax             ; initialize the list to empty
 
                 lea.q       rax,[rbx+Process.stsQ]  ; get the address of the queue head
                 InitializeList      rax             ; initialize the list to empty
@@ -172,6 +199,21 @@ ProcessInit:
                 push        rax                     ; push that offset on the stack
                 call        ListAddHead             ; add it to the list -- first in line
                 add.q       rsp,16                  ; clean up the stack
+
+;----------------------------------------------------------------------------------------------
+; Report the results
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rax,idleProcMsg         ; get the message to print
+                push        rax                     ; push is on the stack
+                call        TextPutString           ; write it to the screen
+
+                mov.q       [rsp],rbx               ; set the address on the stack
+                call        TextPutHexQWord         ; write it to the screen
+
+                mov.q       [rsp],13                ; set a <CR> on the stack
+                call        TextPutChar             ; write it to the screen
+                add.q       rsp,8                   ; clean up the stack
 
 ;----------------------------------------------------------------------------------------------
 ; clean up and exit
@@ -308,6 +350,239 @@ ProcessResetQtm:
 
 ;==============================================================================================
 
+;----------------------------------------------------------------------------------------------
+; qword CreateProcess(qword cmdStr, qword entryAddr, qword numParms, ...) --
+;                                   Create a process.  This function will take a variable
+;                                   number of parameters and put them on the new stack for the
+;                                   user process to accept (this functionality will likely
+;                                   change when we get to a command line initiator).
+;
+; This function is a bit complicated since the function has to create a process structure and
+; initialize it, add the process into the global queue, create a stack, and initialize the
+; stack to meet the needs of a task swap.
+;
+; In order to get a working function, we will take some shortcuts keeping the process running
+; at ring 0, using the kernel CR3 register, and allocating a stack from the kernel stack list.
+; These will be cleaned up later.
+;
+; We will accomplish this function in the following manner:
+; A) Allocate a Process structure
+; B) Allocate a stack from the kernel stacks
+; C) Initialize the process structure
+; D) Add the process to the Global Process Queue (in an initializing status)
+; E) Set the parameters on the process stack
+; F) Set the return address from the entry point to be EndProcess
+; G) Set the "iretq address" from the the next task swap to be the entry point
+; H) Set the initial register values on the stack to be 0
+; I) Ready the process
+;----------------------------------------------------------------------------------------------
+
+                global      CreateProcess
+                extern      TSwapTgt
+
+CreateProcess:
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own
+                push        rbx                     ; save rbx
+                push        rcx                     ; save rcx
+                push        rsi                     ; save rsi
+                push        rdi                     ; save rdi
+                push        r9                      ; save r9
+                pushfq                              ; save the flags
+                cli                                 ; no interrupts -- atomic next PID access
+
+;----------------------------------------------------------------------------------------------
+; First step A) Allocate a new Process structure
+;----------------------------------------------------------------------------------------------
+
+                push        qword Process_size      ; push the size to allocate
+                call        kmalloc                 ; allocate from the heap
+                add.q       rsp,8                   ; clean up the stack
+
+                cmp.q       rax,0                   ; if no memory, exit
+                je          .out                    ; exit if kmalloc fails
+
+                mov.q       rbx,rax                 ; save the structure in rbx
+
+;----------------------------------------------------------------------------------------------
+; Step B) Allocate a stack
+;----------------------------------------------------------------------------------------------
+
+                call        AllocStack              ; go get a stack
+                cmp.q       rax,0                   ; did we get a stack?
+                je          .out2                   ; if we didn't get a stack, exit
+
+                mov.q       r9,rax                  ; save the stack in r9
+
+;----------------------------------------------------------------------------------------------
+; Step C) Initialize the Process structure
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rax,nextPID             ; get the address of the next PID
+                mov.q       rcx,[rax]               ; get the next PID
+                inc         qword [rax]             ; increment the next PID
+
+                mov.q       [rbx+Process.pid],rcx   ; save the PID in the structure
+
+                mov.q       rsi,[rbp+16]            ; get the command string
+                lea.q       rdi,[rbx+Process.name]  ; get the destination address
+                mov.q       rcx,PROC_NAME_LEN       ; get the length to copy
+                dec         rcx                     ; leave room for terminating NULL
+
+.loop:          cmp.q       rcx,0                   ; did we use up all out spaces?
+                je          .nullTerm               ; go terminate with a null
+                cmp.b       [rsi],0                 ; did we reach the end of the string?
+                je          .nullTerm               ; if so, we can terminate with a null
+
+                movsb                               ; copy a character
+
+                dec         rcx                     ; 1 less spot available
+                jmp         .loop                   ; go copy another character
+
+.nullTerm:      mov.b       [rdi],0                 ; put a terminating NULL on the string
+
+                mov.q       [rbx+Process.totQtm],0  ; we have used NO quantum yet
+                mov.b       [rbx+Process.procSts],PROC_INIT ; we are initializing
+                mov.b       [rbx+Process.procPty],PTY_NORM  ; normal proiority
+                mov.b       [rbx+Process.quantum],0 ; no current quantum
+                mov.b       [rbx+Process.fill],0    ; just to be clean
+                mov.q       [rbx+Process.stackAddr],r9  ; save the stack address
+                mov.q       [rbx+Process.ss],ss     ; same stack segment
+                mov.q       rax,cr3                 ; get the PML4 address
+                mov.q       [rbx+Process.cr3],rax   ; save that in the structure
+
+                lea.q       rax,[rbx+Process.stsQ]  ; get the address of the status list struct
+                InitializeList      rax             ; initialize the list
+
+                lea.q       rax,[rbx+Process.glbl]  ; get the address of the global list
+                InitializeList      rax             ; initialize the list
+
+;----------------------------------------------------------------------------------------------
+; Step D) Add the process to the global process list
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rax,GlobalProcessQ      ; get the address of the global Process
+                push        rax                     ; push it on the stack
+                lea.q       rax,[rbx+Process.glbl]  ; get the address of the list pointer
+                push        rax                     ; push it on the stack
+                call        ListAddTail             ; add the process to the global proc list
+                add.q       rsp,16                  ; clean up the stack
+
+;----------------------------------------------------------------------------------------------
+; Step E) Set the parameters on the process stack
+;----------------------------------------------------------------------------------------------
+
+                add.q       r9,STACK_SIZE           ; get to the end of the stack
+
+                mov.q       rcx,[rbp+32]            ; get the parameter count
+                shl.q       rcx,3                   ; convert a count to qwords
+
+.parmLoop:      cmp.q       rcx,0                   ; have we reached 0 parameters?
+                je          .endProc                ; go add the end Proc to the stack
+
+                uPush       r9,[rbp+24+rcx]         ; put the parm on the stack
+                sub.q       rcx,8                   ; move to the PREV parm (right to left)
+                jmp         .parmLoop               ; go push another one
+
+;----------------------------------------------------------------------------------------------
+; Step F) Set the return address from the entry point to be EndProcess
+;----------------------------------------------------------------------------------------------
+
+.endProc:       uPush       r9,EndProc              ; push the process termination address
+
+;----------------------------------------------------------------------------------------------
+; Step G) Set the "iretq address" from the the next task swap to be the entry point
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rcx,r9                  ; get the stack pointer at this point
+                uPush       r9,[rbx+Process.ss]     ; Push the SS on the user stack
+                uPush       r9,rcx                  ; Push the RSP value on the stack
+                uPush       r9,PROC_FLAGS           ; Push the initial process flags on stack
+                uPush       r9,cs                   ; Push the code segment on the stack
+                uPush       r9,[rbp+24]             ; Push the entry point on the stack
+
+;----------------------------------------------------------------------------------------------
+; Step H) Set the initial register values on the stack to be 0
+;----------------------------------------------------------------------------------------------
+
+                uPush       r9,0                    ; saved RBP register
+                uPush       r9,0                    ; saved RAX register
+                uPush       r9,0                    ; saved RBX register
+                uPush       r9,0                    ; saved RCX register
+                uPush       r9,0                    ; saved RDX register
+                uPush       r9,0                    ; saved RSI register
+                uPush       r9,0                    ; saved RDI register
+                uPush       r9,0                    ; saved R8 register
+                uPush       r9,0                    ; saved R9 register
+                uPush       r9,0                    ; saved R10 register
+                uPush       r9,0                    ; saved R11 register
+                uPush       r9,0                    ; saved R12 register
+                uPush       r9,0                    ; saved R13 register
+                uPush       r9,0                    ; saved R14 register
+                uPush       r9,0                    ; saved R15 register
+                uPush       r9,ds                   ; saved DS register
+                uPush       r9,ds                   ; saved ES register
+                uPush       r9,ds                   ; saved FS register
+                uPush       r9,ds                   ; saved GS register
+                uPush       r9,TSwapTgt             ; Return point required by scheduler
+
+                mov.q       [rbx+Process.rsp],r9    ; save the stack pointer in Process struct
+
+;----------------------------------------------------------------------------------------------
+; Report the results
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rax,procAddrMsg         ; get the message to print
+                push        rax                     ; push is on the stack
+                call        TextPutString           ; write it to the screen
+
+                mov.q       [rsp],rbx               ; set the address on the stack
+                call        TextPutHexQWord         ; write it to the screen
+
+                mov.q       [rsp],13                ; set a <CR> on the stack
+                call        TextPutChar             ; write it to the screen
+                add.q       rsp,8                   ; clean up the stack
+
+;----------------------------------------------------------------------------------------------
+; Step I) Ready the process
+;----------------------------------------------------------------------------------------------
+
+                push        rbx                     ; push process struct addr
+                call        ReadyProcess            ; ready the process
+                add.q       rsp,8                   ; clean up the stack
+
+                jmp         .out                    ; time to exit
+
+;----------------------------------------------------------------------------------------------
+; We need to clean up the allocated process and exit
+;----------------------------------------------------------------------------------------------
+
+.out2:
+                push        rbx                     ; push the Process struct on the stack
+                call        kfree                   ; go free the memory
+                add.q       rsp,8                   ; clean up the stack
+
+                xor.q       rax,rax                 ; return NULL
+
+;----------------------------------------------------------------------------------------------
+; clean up and exit
+;----------------------------------------------------------------------------------------------
+
+.out:
+                popfq                               ; restore flags
+                pop         r9                      ; restore r9
+                pop         rdi                     ; restore rdi
+                pop         rsi                     ; restore rsi
+                pop         rbx                     ; restore rbx
+                pop         rcx                     ; restore rcx
+                pop         rbp                     ; restore caller's frame
+                ret
+
+;==============================================================================================
+
+EndProc:        cli
+                jmp         EndProc
+
 ;==============================================================================================
 ; This is the read only data (.rodata) and will be included in the .text section at link
 ;==============================================================================================
@@ -315,3 +590,5 @@ ProcessResetQtm:
                 section     .rodata
 
 idle            db          'idle',0
+idleProcMsg     db          'idle Process strcuture is located at: ',0
+procAddrMsg     db          'The Process structure is loated at: ',0
