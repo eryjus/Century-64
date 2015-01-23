@@ -10,7 +10,7 @@
 ;**********************************************************************************************
 ;
 ;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
-;       Copyright (C) 2014  Adam Scott Clark
+;       Copyright (C) 2014-2015  Adam Scott Clark
 ;
 ;       This program is free software: you can redistribute it and/or modify
 ;       it under the terms of the GNU General Public License as published by
@@ -94,6 +94,8 @@
 ;                            In addition, some general cleanup of unnecessary calls.
 ; 2014/12/02  #217     ADCL  Relocated the paging clean into a function in virtmm.s.
 ; 2014/12/23  #205     ADCL  Added initailization for the Debugging Console (COM1).
+; 2015/01/04  #247     ADCL  Recreated the idle process as the butler process and then created
+;                            a pure (clean) idle process.
 ;
 ;==============================================================================================
 
@@ -531,7 +533,7 @@ StartHigherHalf:
                 call        DbgConsoleInit
 %endif
 
-                call        TextSetBlockCursor      ; create a block cursor
+                call        TextSetNoCursor         ; make cursor go away
                 call        TextClear               ; clear the screen
 
                 mov.q       rbx,HelloString         ; get the hello string to print
@@ -566,15 +568,32 @@ StartHigherHalf:
 ; reclaim the memory we no longer need
 ;----------------------------------------------------------------------------------------------
 
-                call        ReclaimMemory
+                call        ReclaimMemory           ; reclaim any available memory
 
 ;----------------------------------------------------------------------------------------------
 ; Now, initialize the process structures and establish the idle process
 ;----------------------------------------------------------------------------------------------
 
                 call        SpurInit                ; initialize the Spurious Interrupt Handler
-                call        SchedulerInit
-                call        ProcessInit
+                call        SchedulerInit           ; initialize the scheduler
+                call        ProcessInit             ; initialize the current process
+
+;----------------------------------------------------------------------------------------------
+; Create the idle process, and maintain it's priority properly
+;----------------------------------------------------------------------------------------------
+
+                push        0                       ; 0 additional parameters
+                mov.q       rax,idle                ; the starting address
+                push        rax                     ; push it on the stack
+                mov.q       rax,idleProc            ; the name of the process
+                push        rax                     ; push it on the stack
+                call        CreateProcess           ; create the running process
+                add.q       rsp,24                  ; clean up the stack
+
+                push        qword PTY_IDLE          ; we need to set the pty to idle
+                push        rax                     ; the process we just created
+                call        ProcessSetPty           ; go set the priority
+                add.q       rsp,16                  ; clean up the stack
 
 ;----------------------------------------------------------------------------------------------
 ; Now for some testing....
@@ -603,9 +622,14 @@ StartHigherHalf:
 ; Just die for now; more to come here
 ;----------------------------------------------------------------------------------------------
 
-.loop:
+                mov.q       rax,currentProcess      ; get our own process structure var
+                mov.q       rax,[rax]               ; now, get the process address
+                push        qword PTY_IDLE          ; we need to downgrade to idle
+                push        rax                     ; push our structure address
+                call        ProcessSetPty           ; change the process priority
+                add.q       rsp,16                  ; clean up the stack
 
-                hlt
+.loop:          hlt
                 jmp         .loop
 
 
@@ -618,6 +642,13 @@ testProcB:      push        'B'
 .loop:          call        TextPutChar
                 jmp         .loop
 
+;----------------------------------------------------------------------------------------------
+; void idle(void) -- This process is the idle process and will only get CPU time when nothing
+;                    else is available to run on the CPU.  It's implementation is rather
+;                    trivial, as a busy loop.
+;----------------------------------------------------------------------------------------------
+
+idle:           jmp         idle
 
 ;==============================================================================================
 ; The .rodata segment will hold all data related to the kernel
@@ -638,7 +669,7 @@ HelloString:
 %endif
                 db          13,
                 db          13,13,13,13,13,13,13,13
-                db          "               Century-64  Copyright (C) 2014  Adam Scott Clark",13,13
+                db          "            Century-64  Copyright (C) 2014-2015  Adam Scott Clark",13,13
                 db          "This program comes with ABSOLUTELY NO WARRANTY.  This is free software, and you",13
                 db          "are welcome to redistribute it under certain conditions.  For more information,",13
                 db          "see http://www.gnu.org/licenses/gpl-3.0-standalone.html",13,0
@@ -648,3 +679,4 @@ kHeapMsg:
 
 textProcA       db          'testProcA',0
 textProcB       db          'testProcB',0
+idleProc        db          'idle',0

@@ -10,7 +10,7 @@
 ;**********************************************************************************************
 ;
 ;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
-;       Copyright (C) 2014  Adam Scott Clark
+;       Copyright (C) 2014-2015  Adam Scott Clark
 ;
 ;       This program is free software: you can redistribute it and/or modify
 ;       it under the terms of the GNU General Public License as published by

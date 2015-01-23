@@ -8,7 +8,7 @@
 ;**********************************************************************************************
 ;
 ;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
-;       Copyright (C) 2014  Adam Scott Clark
+;       Copyright (C) 2014-2015  Adam Scott Clark
 ;
 ;       This program is free software: you can redistribute it and/or modify
 ;       it under the terms of the GNU General Public License as published by
@@ -86,6 +86,8 @@
 ;                            can support up to 524,288 stacks (512K), each 16K in size.  All
 ;                            stacks will be the same size, so it makes allocation easy to
 ;                            manage.
+; 2015/01/04  #228     ADCL  Make sure that the virtual memory from 0xffff ff7f ffe0 0000 to
+;                            0cffff ff7f ffef ffff cannot be allocated.
 ;
 ;==============================================================================================
 
@@ -895,6 +897,8 @@ VMMInit:
 ;
 ; Though we should be able to service any request presented for which there is enough memory,
 ; there are a few sanity checks we will perform as we attempt to allocate memory:
+; 0. We will not allocated any memory in the region from 0xffff ff7f ffe0 0000 to
+;    0xffff ff7f ffef ffff.
 ; 1. virtAddr needs to be page-aligned.  If it is not, we will truncate the address to a page
 ;    and report a warning to the calling function.
 ; 2. None of the pages from virtAddr to (virtAddr+(pages<<12)) should be mapped already.  If
@@ -942,20 +946,32 @@ VMMAlloc:
 
 ;----------------------------------------------------------------------------------------------
 ; loop through each page requested and perform the following:
+; 0) Check if we are allocating memory in the deisgnated PF range
 ; 1) is the page allocated (i.e. != 0)?
 ; 2) allocate a frame from PMM.
 ; 3) if out of memory, set error and return
 ; 4) map the page
 ; 5) loop until we have address all the requested pages
-;
-; So, we start with the first check.  Note that this is not as simple as it looks on the
+
+;----------------------------------------------------------------------------------------------
+
+.loop:          mov.q       rax,VMM_PF_START        ; get the starting PF address
+                cmp.q       rsi,rax                 ; are we before the low address
+                jb          .good                   ; if so, jump
+
+                mov.q       rax,VMM_PF_END          ; get the ending PF address
+                cmp.q       rsi,rax                 ; are we above the high address
+                jbe         .pfMem                  ; if not, we jump out
+
+;----------------------------------------------------------------------------------------------
+; So, we start with the check #1.  Note that this is not as simple as it looks on the
 ; surface.  There is a chance that the actual page table has not been built and therefore
 ; does not exist.  Accessing that missing page table would cause a page fault.  We don't want
 ; that.  So, rather than building all this logic in this function, call MmuIsPageMapped() to
 ; make this determination for us.  I'm sure we will reuse that logic again somewhere anyway.
 ;----------------------------------------------------------------------------------------------
 
-.loop:          push        rsi                     ; push the virtual address
+.good:          push        rsi                     ; push the virtual address
                 call        MmuIsPageMapped         ; find out if the page is mapped
                 add.q       rsp,8                   ; clean up the stack
 
@@ -999,6 +1015,14 @@ VMMAlloc:
 ;----------------------------------------------------------------------------------------------
 
 .noMem:         mov.q       r9,VMM_ERR_NOMEM        ; set the return value to error
+                jmp         .out                    ; go ahead and exit
+
+;----------------------------------------------------------------------------------------------
+; We are trying to allocate memory in the region from VMM_PF_START to VMM_PF_END; report and
+; exit
+;----------------------------------------------------------------------------------------------
+
+.pfMem:         mov.q       r9,VMM_ERR_BAD_MEM      ; set the return value to error
                 jmp         .out                    ; go ahead and exit
 
 ;----------------------------------------------------------------------------------------------

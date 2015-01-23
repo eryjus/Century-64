@@ -7,7 +7,7 @@
 ;**********************************************************************************************
 ;
 ;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
-;       Copyright (C) 2014  Adam Scott Clark
+;       Copyright (C) 2014-2015  Adam Scott Clark
 ;
 ;       This program is free software: you can redistribute it and/or modify
 ;       it under the terms of the GNU General Public License as published by
@@ -27,8 +27,12 @@
 ;    Date     Tracker  Pgmr  Description
 ; ----------  ------   ----  ------------------------------------------------------------------
 ; 2014/10/06  Initial  ADCL  Initial version
+; 2015/01/04  #228     ADCL  Make sure that the virtual memory from 0xffff ff7f ffe0 0000 to
+;                            0cffff ff7f ffef ffff cannot be allocated.
 ;
 ;==============================================================================================
+
+; %define         DISABLE_DBG_CONSOLE
 
 ;----------------------------------------------------------------------------------------------
 ; -- the following macros are to make coding simpler
@@ -227,6 +231,7 @@ STACK_SIZE      equ         0x0000000000004000              ; 16K
                 extern      TextPutString
                 extern      TextSetAttr
                 extern      TextSetBlockCursor
+                extern      TextSetNoCursor
 %endif
 
 ;----------------------------------------------------------------------------------------------
@@ -280,6 +285,10 @@ VMM_WARN_ALIGN  equ         0x0000000000000001
 VMM_WARN_MAPPED equ         0x0000000000000002
 VMM_WARN_NOTMAPPED equ      0x0000000000000003
 VMM_ERR_NOMEM   equ         0xffffffffffffffff
+VMM_ERR_BAD_MEM equ         0xfffffffffffffffe
+
+VMM_PF_START    equ         0xffffff7fffe00000
+VMM_PF_END      equ         0xffffff7fffefffff
 
 %ifndef __VIRTMM_S__
                 extern      VMMInit
@@ -358,6 +367,8 @@ BADLISTNEXT     equ         0xffffff7fffe00200
                 extern      RdyNormQAdd
                 extern      RdyLowQAdd
                 extern      RdyIdleQAdd
+                extern      GetNextProcess
+                extern      SwitchToProcess
 %endif
 
 ;----------------------------------------------------------------------------------------------
@@ -424,6 +435,7 @@ endstruc
 
                 extern      ProcessInit
                 extern      ProcessResetQtm
+                extern      ProcessSetPty
 
                 extern      CreateProcess
                 extern      ReadyProcess
@@ -475,6 +487,7 @@ endstruc
                 extern      DbgConsoleInit
                 extern      DbgConsolePutChar
                 extern      DbgConsolePutString
+                extern      DbgConsolePutHexByte
 %endif
 %endif
 

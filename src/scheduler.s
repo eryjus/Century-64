@@ -8,7 +8,7 @@
 ;**********************************************************************************************
 ;
 ;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
-;       Copyright (C) 2014  Adam Scott Clark
+;       Copyright (C) 2014-2015  Adam Scott Clark
 ;
 ;       This program is free software: you can redistribute it and/or modify
 ;       it under the terms of the GNU General Public License as published by
@@ -287,7 +287,8 @@ SchedulerInit:
                 mov.q       [rbx+Scheduler.stackPtr],rax    ; set it in the struct
 
 ;----------------------------------------------------------------------------------------------
-; initialize the PIC
+; initialize the PIC. We are looking for a frequency of 500 cycles per second.  This is
+; calculated as 1.193182MHz/500 (or 1193182/500 == 2386 [rounded], or 0x0952)
 ;----------------------------------------------------------------------------------------------
 
                 call        picInit                 ; Initialize the 8259 PIC
@@ -305,7 +306,7 @@ SchedulerInit:
 ; now, install the IRQ0 handler and enable the IRQ
 ;----------------------------------------------------------------------------------------------
 
-                mov.q       rax,IST2                ; we want IST2
+                mov.q       rax,RSP0                ; we want RSP0
                 push        rax                     ; push it on the stack
                 mov.q       rax,IRQ0Handler         ; this is our handler address
                 push        rax                     ; push that on the stack
@@ -709,6 +710,7 @@ IRQ0Handler:
                 mov.q       rax,timerCounter        ; get the address of the var
                 inc         qword [rax]             ; increment the counter
 
+%if 0
                 mov.q       rbx,[rax]               ; get the value in a work register
                 and.q       rbx,0x01ff              ; is it time to update the screen?
                 cmp.q       rbx,0x0100              ; are these bits 0?
@@ -722,6 +724,7 @@ IRQ0Handler:
 
 .clr:           mov.b       al,' '
 .upd:           mov.b       [0xb8000],al
+%endif
 
 ;----------------------------------------------------------------------------------------------
 ; Now, some housekeeping for the running process
@@ -803,37 +806,37 @@ IRQ0Handler:
                 mov.q       rdi,[rbp+32]            ; get the user stack pointer
                 sub.q       rdi,200                 ; make room for the registers
 
-                mov.q       rax,[rbp+40]            ; get SS from the IST2 stack
+                mov.q       rax,[rbp+40]            ; get SS from the stack
                 mov.q       [rdi+192],rax           ; set SS into the user stack
 
-                mov.q       rax,[rbp+32]            ; get RSP from the IST2 stack
+                mov.q       rax,[rbp+32]            ; get RSP from the stack
                 mov.q       [rdi+184],rax           ; set RSP into the user stack
 
-                mov.q       rax,[rbp+24]            ; get the RFLAGS from the IST2 stack
+                mov.q       rax,[rbp+24]            ; get the RFLAGS from the stack
                 mov.q       [rdi+176],rax           ; set RFLAGS into the user stack
 
-                mov.q       rax,[rbp+16]            ; get the CS from the IST2 stack
+                mov.q       rax,[rbp+16]            ; get the CS from the stack
                 mov.q       [rdi+168],rax           ; set the CS into the user stack
 
-                mov.q       rax,[rbp+8]             ; get RIP from the IST2 stack
+                mov.q       rax,[rbp+8]             ; get RIP from the stack
                 mov.q       [rdi+160],rax           ; set RIP into the user stack
 
-                mov.q       rax,[rbp]               ; get RBP from the IST2 stack
+                mov.q       rax,[rbp]               ; get RBP from the stack
                 mov.q       [rdi+152],rax           ; set RBP into the user stack
 
-                mov.q       rax,[rbp-8]             ; get RAX from the IST2 stack
+                mov.q       rax,[rbp-8]             ; get RAX from the stack
                 mov.q       [rdi+144],rax           ; set RAX into the user stack
 
-                mov.q       rax,[rbp-16]            ; get RBX from the IST2 stack
+                mov.q       rax,[rbp-16]            ; get RBX from the stack
                 mov.q       [rdi+136],rax           ; set RBX into the user stack
 
                 mov.q       [rdi+128],rcx           ; set RCX into the user stack
                 mov.q       [rdi+120],rdx           ; set RDX into the user stack
 
-                mov.q       rax,[rbp-24]            ; get RSI from the IST2 stack
+                mov.q       rax,[rbp-24]            ; get RSI from the stack
                 mov.q       [rdi+112],rax           ; set RSI into the user stack
 
-                mov.q       rax,[rbp-32]            ; get RDI from the IST2 stack
+                mov.q       rax,[rbp-32]            ; get RDI from the stack
                 mov.q       [rdi+104],rax           ; set RDI into the user stack
 
                 mov.q       [rdi+96],r8             ; set R8 into the user stack
@@ -865,7 +868,7 @@ IRQ0Handler:
 ; Nearly there.  Now we need to save the state of the CR3, SS, and RSP in the process structure
 ;----------------------------------------------------------------------------------------------
 
-                mov.q       rax,[rbp+40]            ; get SS from the IST2 stack
+                mov.q       rax,[rbp+48]            ; get SS from the stack
                 mov.q       [rbx+Process.ss],rax    ; set SS into the Process structure
 
                 mov.q       rax,cr3                 ; get CR3
@@ -879,9 +882,9 @@ IRQ0Handler:
 ; last thing to do is call SwitchToProcess.  Switch to task will restore the CR3 page tables
 ; and the SS:RSP values and then return.  However, we will not be returing on THIS STACK.  This
 ; is important to fully grasp.  SwitchToProcess does not return to this point.  We will be
-; abandoning the IST2 stack for the user stack and SwitchToProcess will actually return to
-; TSwapTgt.  IST2 will not get used after this call and can be trashed by the next IRQ to use
-; that stack.  There will be no need to clean up the stack.
+; abandoning the stack for the user stack and SwitchToProcess will actually return to
+; TSwapTgt.  The stack will not get used after this call and can be trashed by the next IRQ to
+; use that stack.  There will be no need to clean up the stack.
 ;----------------------------------------------------------------------------------------------
 
                 push        1                       ; we need an EOI
@@ -900,9 +903,12 @@ IRQ0Handler:
 .eoi:
 %if 0
 %ifndef DISABLE_DBG_CONSOLE
-                mov.q       rax,eoiStart            ; get the address of the message
-                push        rax                     ; push it on the stack
-                call        DbgConsolePutString     ; write it to the screen
+                mov.q       rax,currentProcess      ; get the address of the currentProcess
+                mov.q       rax,[rax]               ; get the currentProcess Struct addr
+                xor.q       rbx,rbx                 ; clear rbx
+                mov.b       bl,[rax+Process.quantum]; get the current quantum
+                push        rbx                     ; save this to the stack
+                call        DbgConsolePutHexByte    ; write it to the screen
                 add.q       rsp,8                   ; clean up the stack
 %endif
 %endif

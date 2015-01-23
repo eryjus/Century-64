@@ -7,7 +7,7 @@
 ;**********************************************************************************************
 ;
 ;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
-;       Copyright (C) 2014  Adam Scott Clark
+;       Copyright (C) 2014-2015  Adam Scott Clark
 ;
 ;       This program is free software: you can redistribute it and/or modify
 ;       it under the terms of the GNU General Public License as published by
@@ -73,6 +73,9 @@
 ;    Date     Tracker  Pgmr  Description
 ; ----------  -------  ----  ------------------------------------------------------------------
 ; 2014/11/30  Initial  ADCL  Initial code
+; 2015/01/22  #255     ADCL  IST 2, 3, and 4 do not need a stack.  Changing the TSS to not have
+;                            0 for that stack pointer (and not allocate a stack).  As a matter
+;                            of fact, RSP1 and 2 should not be needed either.
 ;
 ;==============================================================================================
 
@@ -497,28 +500,30 @@ NewTSS:
                 add         rax,STACK_SIZE          ; move to the end of the stack
                 mov.q       [rbx+TSS.rsp0],rax      ; store the stack pinter
 
-                call        AllocStack              ; get a stack
-                add         rax,STACK_SIZE          ; move to the end of the stack
+                xor.q       rax,rax                 ; clear rax
+;                call        AllocStack              ; get a stack
+;                add         rax,STACK_SIZE          ; move to the end of the stack
                 mov.q       [rbx+TSS.rsp1],rax      ; store the stack pinter
 
-                call        AllocStack              ; get a stack
-                add         rax,STACK_SIZE          ; move to the end of the stack
+;                call        AllocStack              ; get a stack
+;                add         rax,STACK_SIZE          ; move to the end of the stack
                 mov.q       [rbx+TSS.rsp2],rax      ; store the stack pinter
 
                 call        AllocStack              ; get a stack
                 add         rax,STACK_SIZE          ; move to the end of the stack
                 mov.q       [rbx+TSS.ist1],rax      ; store the stack pinter
 
-                call        AllocStack              ; get a stack
-                add         rax,STACK_SIZE          ; move to the end of the stack
+                xor.q       rax,rax                 ; clear rax
+;                call        AllocStack              ; get a stack
+;                add         rax,STACK_SIZE          ; move to the end of the stack
                 mov.q       [rbx+TSS.ist2],rax      ; store the stack pinter
 
-                call        AllocStack              ; get a stack
-                add         rax,STACK_SIZE          ; move to the end of the stack
+;                call        AllocStack              ; get a stack
+;                add         rax,STACK_SIZE          ; move to the end of the stack
                 mov.q       [rbx+TSS.ist3],rax      ; store the stack pinter
 
-                call        AllocStack              ; get a stack
-                add         rax,STACK_SIZE          ; move to the end of the stack
+;                call        AllocStack              ; get a stack
+;                add         rax,STACK_SIZE          ; move to the end of the stack
                 mov.q       [rbx+TSS.ist4],rax      ; store the stack pinter
 
                 call        AllocStack              ; get a stack

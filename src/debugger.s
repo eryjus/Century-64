@@ -9,7 +9,7 @@
 ;**********************************************************************************************
 ;
 ;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
-;       Copyright (C) 2014  Adam Scott Clark
+;       Copyright (C) 2014-2015  Adam Scott Clark
 ;
 ;       This program is free software: you can redistribute it and/or modify
 ;       it under the terms of the GNU General Public License as published by
@@ -36,6 +36,8 @@
 ;    Date     Tracker  Pgmr  Description
 ; ----------  -------  ----  ------------------------------------------------------------------
 ; 2014/12/04  Initial  ADCL  Initial code
+; 2015/01/05  #244     ADCL  Output the error code with the error message in the debugger
+; 2015/01/06  #237     ADCL  Created a basic panic function.  This will evolve over time
 ;
 ;==============================================================================================
 
@@ -71,10 +73,36 @@
 
 ;----------------------------------------------------------------------------------------------
 ; this is what is included if the debugger is disabled at compile.  We still want something at
-; the label, but it really needs to be a trivial return.
+; the label, and eventually there will be a full-blown BSoD-type error.  However, for now, we
+; will just output the message and halt the system.
 ;----------------------------------------------------------------------------------------------
 
-debugger:       ret
+%define         __DEBUGGER_S__
+%include        'private.inc'
+
+panic:
+debugger:       cli                                 ; stop all interrupts NOW!
+                push        rbp                     ; save the caller's frame
+                mov.q       rbp,rsp                 ; create our own frame for stack traceback
+
+;----------------------------------------------------------------------------------------------
+; we will not save any other registers since we will be killing everything
+;----------------------------------------------------------------------------------------------
+
+                push        qword 0x4f              ; we want bright white on red
+                call        TextSetAttr             ; set the attribute
+
+                mov.q       rax,[rbp+24]            ; get the error message address
+                mov.q       [rsp],rax               ; and set it on the stack
+                call        TextPutString           ; write the message to the string
+                add.q       rsp,8                   ; clean up the stack
+
+.loop:          hlt                                 ; halt the processor
+                jmp         .loop                   ; infinite loop -- just in case
+
+;----------------------------------------------------------------------------------------------
+; This function does not return!!
+;----------------------------------------------------------------------------------------------
 
 ;==============================================================================================
 
@@ -613,9 +641,15 @@ dbgBasicScreen:
                 mov         rax,[rbp+24]            ; get the message parm
                 mov         [rsp+24],rax            ; put the message on the stack
                 mov         qword [rsp+16],COLOR(RED,CYAN); put the attr on the stack
-                mov         qword [rsp+8],20        ; put the col on the stack
+                mov         qword [rsp+8],0         ; put the col on the stack
                 mov         qword [rsp],1           ; put the row on the stack
                 call        dbgPutString            ; print the screen
+
+                mov         qword [rsp+32],8        ; put the # bytes for hex value on stack
+                mov         rax,[rbp+16]            ; get the frame block pointer
+                mov         rax,[rax+8]             ; get the error code from the frame
+                mov         [rsp+24],rax            ; put the message on the stack
+                call        dbgPutHex               ; print the screen
 
 ;----------------------------------------------------------------------------------------------
 ; Put the labels doen the left side of the screen
@@ -942,8 +976,7 @@ dbgBasicScreen:
 ; Finally, put the stack on the screen
 ;----------------------------------------------------------------------------------------------
 
-.stack:
-                mov         rcx,23                  ; set the bottom line to start
+.stack:         mov         rcx,23                  ; set the bottom line to start
                 xor         rdx,rdx                 ; clear rdx - not at bottom of stack
                 mov         rax,[rbp+16]            ; get the frame as passed
                 mov         rsi,[rax+40]            ; get the stack pointer address

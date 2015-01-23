@@ -8,7 +8,7 @@
 ;**********************************************************************************************
 ;
 ;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
-;       Copyright (C) 2014  Adam Scott Clark
+;       Copyright (C) 2014-2015  Adam Scott Clark
 ;
 ;       This program is free software: you can redistribute it and/or modify
 ;       it under the terms of the GNU General Public License as published by
@@ -41,6 +41,11 @@
 ; global process queue.  Issue resolved.
 ;
 ; The following functions are published in this source:
+;   void ProcessInit(void);
+;   void ReadyProcess(qword proc);
+;   void ProcessResetQtm(qword proc);
+;   void ProcessSetPty(qword proc, byte Pty);
+;   qword CreateProcess(qword cmdStr, qword entryAddr, qword numParms, ...);
 ;
 ; The following functions are internal to the source file:
 ;
@@ -49,6 +54,8 @@
 ;    Date     Tracker  Pgmr  Description
 ; ----------  -------  ----  ------------------------------------------------------------------
 ; 2014/12/07  Initial  ADCL  Initial version
+; 2015/01/04  #247     ADCL  Recreated the idle process as the butler process and then created
+;                            a pure (clean) idle process.
 ;
 ;==============================================================================================
 
@@ -149,7 +156,7 @@ ProcessInit:
 ; Set up the process name
 ;----------------------------------------------------------------------------------------------
 
-                mov.q       rsi,idle                ; set the pointer to the idle process name
+                mov.q       rsi,butler              ; set the pointer to the butler proc name
                 lea.q       rdi,[rbx+Process.name]  ; get the address of the name
                 mov.q       rcx,PROC_NAME_LEN       ; get the length to copy
                 sub.q       rcx,1                   ; leave room for the terminating NULL
@@ -173,7 +180,7 @@ ProcessInit:
 
                 mov.b       [rbx+Process.procSts],PROC_RUN  ; this is the running process!
                 mov.q       [rbx+Process.totQtm],0  ; clear total quantum
-                mov.b       [rbx+Process.procPty],PTY_IDLE  ; idle priority process
+                mov.b       [rbx+Process.procPty],PTY_KERN  ; This will become the Butler proc
                 mov.b       [rbx+Process.quantum],0 ; clear total quantum
                 mov.q       [rbx+Process.stackAddr],0   ; stackAddr
                 mov.q       [rbx+Process.ss],0      ; ss
@@ -204,6 +211,7 @@ ProcessInit:
 ; Report the results
 ;----------------------------------------------------------------------------------------------
 
+%ifndef DISABLE_DEBUG_CONSOLE
                 mov.q       rax,idleProcMsg         ; get the message to print
                 push        rax                     ; push is on the stack
                 call        TextPutString           ; write it to the screen
@@ -214,6 +222,7 @@ ProcessInit:
                 mov.q       [rsp],13                ; set a <CR> on the stack
                 call        TextPutChar             ; write it to the screen
                 add.q       rsp,8                   ; clean up the stack
+%endif
 
 ;----------------------------------------------------------------------------------------------
 ; clean up and exit
@@ -339,6 +348,74 @@ ProcessResetQtm:
                 mov.q       rbx,[rbp+16]            ; get the process struct address
                 mov.b       al,[rbx+Process.procPty]; get the priority, which is also quantum
                 mov.b       [rbx+Process.quantum],al; set the quantum
+
+;----------------------------------------------------------------------------------------------
+; Clean up and exit
+;----------------------------------------------------------------------------------------------
+.out:
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; void ProcessSetPty(qword proc, byte Pty) -- Sets the specified process priority
+;
+; The big question here is whether to allow a process to increase its priority to, say,
+; PTY_KERN to get a bigger timslice.  For now, this function will take any process and will
+; update that process's priority to whatever is specified (within reason -- it MUS be one of
+; the 5 allowed priorities).  Anything out of that tolerance will be dropped to the PTY_NORM
+; priority.
+;----------------------------------------------------------------------------------------------
+
+                global      ProcessSetPty
+
+ProcessSetPty:
+                push        rbp                     ; save caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
+
+;----------------------------------------------------------------------------------------------
+; So, first the sanity check -- make sure the priority we are dealing with is one of the
+; 5 allowed priorities
+;----------------------------------------------------------------------------------------------
+
+                mov.q       rax,[rbp+24]            ; get the priority parameter - only al used
+                cmp.b       al,PTY_KERN             ; is this a kernel pty request?
+                je          .good                   ; ok, we are good
+
+                cmp.b       al,PTY_HIGH             ; is this a high pty request?
+                je          .good                   ; ok, we are good
+
+                cmp.b       al,PTY_LOW              ; is this a low pty request?
+                je          .good                   ; ok, we are good
+
+                cmp.b       al,PTY_IDLE             ; is this an idle pty request?
+                je          .good                   ; ok, we are good
+
+;----------------------------------------------------------------------------------------------
+; OK, so we have gotten here and one of 2 things has happened: 1) we have a bad pty requested
+; -- in which case we will set the PTY to be PTY_NORM; or, 2) we have a request for PTY_NORM
+; -- in which case we do not want the extra branch and will just overwrite the pty requested
+; with PTY_NORM (the same value).
+;----------------------------------------------------------------------------------------------
+
+                mov.b       al,PTY_NORM             ; set the requested value
+
+.good:          mov.q       rbx,[rbp+16]            ; get the process structure address
+                mov.b       [rbx+Process.procPty],al; set the new priority
+
+;----------------------------------------------------------------------------------------------
+; Now, we have some housekeeping to do to keep the structures in a proper state.  First of all,
+; if the process is the current process we need to determine if we will need to reschedule it.
+; Also, if we just raised a priority over the currently running process, we need to preempt
+; the current process.  Finally, if we changed a priority of a process in the ready queue, we
+; need to move it to the proper queue (which in theory should take care of a reschedule).
+;
+; None of this is coded at the moment.
+;----------------------------------------------------------------------------------------------
+
 
 ;----------------------------------------------------------------------------------------------
 ; Clean up and exit
@@ -532,6 +609,7 @@ CreateProcess:
 ; Report the results
 ;----------------------------------------------------------------------------------------------
 
+%ifndef DISABLE_DEBUG_CONSOLE
                 mov.q       rax,procAddrMsg         ; get the message to print
                 push        rax                     ; push is on the stack
                 call        TextPutString           ; write it to the screen
@@ -542,6 +620,7 @@ CreateProcess:
                 mov.q       [rsp],13                ; set a <CR> on the stack
                 call        TextPutChar             ; write it to the screen
                 add.q       rsp,8                   ; clean up the stack
+%endif
 
 ;----------------------------------------------------------------------------------------------
 ; Step I) Ready the process
@@ -580,8 +659,57 @@ CreateProcess:
 
 ;==============================================================================================
 
-EndProc:        cli
-                jmp         EndProc
+;----------------------------------------------------------------------------------------------
+; EndProc -- The following will become the return point when a process is completed.  It is
+;            responsible for the cleanup from a process perspective.  The challenge here is
+;            that this process will gain control while in user mode, not in kernel mode.  So,
+;            we will not have access to the kernel structures that are required to manage the
+;            process.
+;
+; So, our first challenge is to get into kernel mode.  I think the best way to do this will be
+; to perform a system call for the process to commit suicide (kill(currentProcess)).  Another
+; possibility here is to send a message to a process reaper task (i.e. the butler task) to
+; perform all the cleanup.
+;
+; The second problem is going to be stack management.  We cannot do stack cleanup while using
+; the same stack we need to clean.  On the other hand, we cannot use a common stack without a
+; lot of synchronization primitives (for which care needs to be taken to prevent deadlock).
+;
+; The final challenge is going to be lock management, where locks held by the process need to
+; be released.  This will most likely cause a number of possible reschedules and we really
+; should consider waiting until all of the locks have been freed before performing a reschedule
+; as a higher priority process might be released to work after another normal priorirty process
+; has been freed.  If we reschedule too early, we might be giving the CPU to an incorrect
+; process.
+;
+; For now, we will change the status to be PROC_END and take it off any of the Status Queues.
+; All of the structures and locks will remain allocated, which will cause all kinds of problems
+; in the very near future.  But for now, it is the best and most complete I have (until I get
+; either messaging or system calls implemented).  The last thing to do will be to reschedule
+; to the next process.
+;----------------------------------------------------------------------------------------------
+
+EndProc:        cli                                 ; make sure we are not interrupted
+                mov.q       rbx,currentProcess      ; get the current process pointer addr
+                mov.q       rbx,[rbx]               ; get the current process struct addr
+                mov.b       [rbx+Process.procSts],PROC_END  ; note that we are ending this proc
+
+                lea.q       rax,[rbx+Process.stsQ]  ; get the status Queue address
+                push        rax                     ; push that on the stack
+                call        ListDelInit             ; remove it and init it to point to itself
+                add.q       rsp,8                   ; clean up the stack
+
+                call        GetNextProcess          ; get the next process to give the CPU to
+
+                push        qword 0                 ; we do not need an EOI
+                push        rax                     ; push the new process
+                call        SwitchToProcess         ; give the CPU back to the next process
+
+                ; =================================================
+                ; !!!!!  Control never returns to this point  !!!!!
+                ; =================================================
+
+                jmp         EndProc                 ; need to put in a panic function here
 
 ;==============================================================================================
 ; This is the read only data (.rodata) and will be included in the .text section at link
@@ -589,6 +717,9 @@ EndProc:        cli
 
                 section     .rodata
 
-idle            db          'idle',0
+butler          db          'butler',0
+
+%ifndef DISABLE_DEBUG_CONSOLE
 idleProcMsg     db          'idle Process strcuture is located at: ',0
 procAddrMsg     db          'The Process structure is loated at: ',0
+%endif

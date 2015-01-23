@@ -8,7 +8,7 @@
 ;**********************************************************************************************
 ;
 ;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
-;       Copyright (C) 2014  Adam Scott Clark
+;       Copyright (C) 2014-2015  Adam Scott Clark
 ;
 ;       This program is free software: you can redistribute it and/or modify
 ;       it under the terms of the GNU General Public License as published by
@@ -40,6 +40,18 @@
 ; control over the interrupt gate and allow me to assign a stack to the interrupts from the
 ; Interrupt Stack Table (IST) located in the TSS.
 ;
+; However, as I have been testing, this is a bit of a misnomber.  I can set up different stacks
+; for different interrupts, but the IST addresses in the TSS are constant (or constant untill
+; I change them).  Therefore, if 2 interrupts share the same IST number, they are sharing the
+; same stack, but more to the point the same stack starting address and the exact same address
+; space.  If I get 2 exceptions at the same time (or nested exceptions), I will have problems.
+; The solution is as follows:
+; 1) Use the ISTs sparingly
+; 2) Keep a RSP0 pointer in the process structure and manually set RSP0 in the TSS on a task
+;    change (need to think about the details on this)
+; 3) Allow a nested exceptions to stack on top of each other on the same stack
+; As a result of the above changes, several changes will be needed in this source.
+;
 ; What gives me some debate at the moment is how to handle multiple devices that utilize the
 ; same IRQ number (which is the same interrupt).  I need some way to "multiplex" an IRQ
 ; interrupt, and I really do not want too much of this to be handled in the kernel.
@@ -54,42 +66,42 @@
 ; stack to use.
 ;
 ; 00  #DE  Fault        RSP0  Kernel  -- Divide Error Exception
-; 01  #DB  Trap/Fault   IST1  Kernel  -- Debug Exception
+; 01  #DB  Trap/Fault   RSP0  Kernel  -- Debug Exception
 ; 02  MNI  N/A          IST7  Kernel  -- Non Maskable Interrupt
 ; 03  #BP  Trap         IST1  Kernel  -- Breakpoint Exception
 ; 04  #OF  Trap         RSP0  Kernel  -- Overflow Exception
 ; 05  #BR  Fault        RSP0  Kernel  -- BOUND Range Exceeded Exception
-; 06  #UD  Fault        IST6  Kernel  -- Invalid Opcode Exception
-; 07  #NM  Fault        IST6  Kernel  -- Device Not Available Exception
-; 08  #DF  Abort        IST7  Kernel  -- Double Fault Exception
+; 06  #UD  Fault        RSP0  Kernel  -- Invalid Opcode Exception
+; 07  #NM  Fault        RSP0  Kernel  -- Device Not Available Exception
+; 08  #DF  Abort        IST6  Kernel  -- Double Fault Exception
 ; 09  N/A  N/A          N/A   None    -- Old Coprocessor Segment Overrun -- no longer used
-; 0A  #TS  Fault        IST6  Kernel  -- Invalid TSS Exception
-; 0B  #NP  Fault        IST6  Kernel  -- Segment Not Present
-; 0C  #SS  Fault        IST6  Kernel  -- Stack Fault Exception
-; 0D  #GP  Fault        IST6  Kernel  -- General Protection Exception
-; 0E  #PF  Fault        IST5  Kernel  -- Page Fault Exception
+; 0A  #TS  Fault        RSP0  Kernel  -- Invalid TSS Exception
+; 0B  #NP  Fault        RSP0  Kernel  -- Segment Not Present
+; 0C  #SS  Fault        RSP0  Kernel  -- Stack Fault Exception
+; 0D  #GP  Fault        RSP0  Kernel  -- General Protection Exception
+; 0E  #PF  Fault        RSP0  Kernel  -- Page Fault Exception
 ; 0F  N/A  N/A          N/A   None    -- Unused
-; 10  #MF  Fault        IST6  Kernel  -- x87 Floating Point Error
-; 11  #AC  Fault        IST6  Kernel  -- Alignment Check Exception
-; 12  #MC  Abort        IST7  Kernel  -- Machine Check Exception
-; 13  #XM  Fault        IST6  Kernel  -- SIMD Floating Point Exception
+; 10  #MF  Fault        RSP0  Kernel  -- x87 Floating Point Error
+; 11  #AC  Fault        RSP0  Kernel  -- Alignment Check Exception
+; 12  #MC  Abort        IST5  Kernel  -- Machine Check Exception
+; 13  #XM  Fault        RSP0  Kernel  -- SIMD Floating Point Exception
 ; 14 - 1F are reserved by Intel and will not be used
-; 20    IRQ0            IST2  Driver
-; 21    IRQ1            IST2  Driver
-; 22    IRQ2            IST2  Driver
-; 23    IRQ3            IST2  Driver
-; 24    IRQ4            IST2  Driver
-; 25    IRQ5            IST2  Driver
-; 26    IRQ6            IST2  Driver
-; 27    IRQ7            IST2  Driver
-; 28    IRQ8            IST3  Driver
-; 29    IRQ9            IST3  Driver
-; 2A    IRQ10           IST3  Driver
-; 2B    IRQ11           IST3  Driver
-; 2C    IRQ12           IST3  Driver
-; 2D    IRQ13           IST3  Driver
-; 2E    IRQ14           IST3  Driver
-; 2F    IRQ15           IST3  Driver
+; 20    IRQ0            RSP0  Driver
+; 21    IRQ1            RSP0  Driver
+; 22    IRQ2            RSP0  Driver
+; 23    IRQ3            RSP0  Driver
+; 24    IRQ4            RSP0  Driver
+; 25    IRQ5            RSP0  Driver
+; 26    IRQ6            RSP0  Driver
+; 27    IRQ7            RSP0  Driver
+; 28    IRQ8            RSP0  Driver
+; 29    IRQ9            RSP0  Driver
+; 2A    IRQ10           RSP0  Driver
+; 2B    IRQ11           RSP0  Driver
+; 2C    IRQ12           RSP0  Driver
+; 2D    IRQ13           RSP0  Driver
+; 2E    IRQ14           RSP0  Driver
+; 2F    IRQ15           RSP0  Driver
 ;
 ; From the above chart, the following stacks in the TSS are used in specific manners.  This is
 ; formalized in the following table:
@@ -98,12 +110,12 @@
 ;  RSP1 -- Unused
 ;  RSP2 -- Unused
 ;  IST1 -- Debugger
-;  IST2 -- IRQs
-;  IST3 -- IRQs
-;  IST4 -- System Calls
-;  IST5 -- Page Faults
-;  IST6 -- Recoverable and CPU Structure exceptions
-;  IST7 -- Fatal errors
+;  IST2 -- Unused
+;  IST3 -- Unused
+;  IST4 -- Unused
+;  IST5 -- Machine Check (since it can occur during a task swap)
+;  IST6 -- Double Faule (in case it is as a result a stack problem)
+;  IST7 -- NMI (since it can occur during a task swap)
 ;
 ; The following functions are published in this file:
 ;   void IDTInit(void);
@@ -134,8 +146,13 @@
 ;    Date     Tracker  Pgmr  Description
 ; ----------  -------  ----  ------------------------------------------------------------------
 ; 2014/12/04  Initial  ADCL  Initial code
-; 2015/12/16  #224     ADCL  With the initial debugger, all interrupts are now call the
+; 2014/12/16  #224     ADCL  With the initial debugger, all interrupts are now call the
 ;                            debugger.
+; 2015/01/05  #244     ADCL  Output the error code with the error message in the debugger
+; 2015/01/22  #255     ADCL  Need to better utilize the ISTs in the TSS.  I have been over-
+;                            using them which has led to several issues.  Some significant
+;                            changes are going to be made around this change, and I might have
+;                            lots of additional changes as a result in other files.
 ;
 ;==============================================================================================
 
@@ -237,7 +254,7 @@ IDTInit:
 ; INT1 -- #DB -- Debug Exception
 ;----------------------------------------------------------------------------------------------
 
-                push        IST1                        ; use IST1
+                push        RSP0                        ; use RSP0
                 mov.q       rax,DB_Exception            ; get the address of the handler
                 push        rax                         ; and push it on the stack
                 push        1                           ; set INT1
@@ -292,7 +309,7 @@ IDTInit:
 ; INT6 -- #UD -- Invalid Opcode Fault
 ;----------------------------------------------------------------------------------------------
 
-                push        IST6                        ; use IST6
+                push        RSP0                        ; use RSP0
                 mov.q       rax,UD_Fault                ; get the address of the handler
                 push        rax                         ; and push it on the stack
                 push        6                           ; set INT6
@@ -303,7 +320,7 @@ IDTInit:
 ; INT7 -- #NM -- Device Not Available Fault
 ;----------------------------------------------------------------------------------------------
 
-                push        IST6                        ; use IST6
+                push        RSP0                        ; use RSP0
                 mov.q       rax,NM_Fault                ; get the address of the handler
                 push        rax                         ; and push it on the stack
                 push        7                           ; set INT7
@@ -314,7 +331,7 @@ IDTInit:
 ; INT8 -- #DF -- Double Fault Abort
 ;----------------------------------------------------------------------------------------------
 
-                push        IST7                        ; use IST7
+                push        IST6                        ; use IST6
                 mov.q       rax,DF_Abort                ; get the address of the handler
                 push        rax                         ; and push it on the stack
                 push        8                           ; set INT8
@@ -326,7 +343,7 @@ IDTInit:
 ; INT10 -- #TS -- Invalid TSS
 ;----------------------------------------------------------------------------------------------
 
-                push        IST6                        ; use IST6
+                push        RSP0                        ; use RSP0
                 mov.q       rax,TS_Fault                ; get the address of the handler
                 push        rax                         ; and push it on the stack
                 push        10                          ; set INT10
@@ -337,7 +354,7 @@ IDTInit:
 ; INT11 -- #NP -- Segment Not Present Fault
 ;----------------------------------------------------------------------------------------------
 
-                push        IST6                        ; use IST6
+                push        RSP0                        ; use RSP0
                 mov.q       rax,NP_Fault                ; get the address of the handler
                 push        rax                         ; and push it on the stack
                 push        11                          ; set INT11
@@ -348,7 +365,7 @@ IDTInit:
 ; INT12 -- #SS -- Stack Fault
 ;----------------------------------------------------------------------------------------------
 
-                push        IST6                        ; use IST6
+                push        RSP0                        ; use RSP0
                 mov.q       rax,SS_Fault                ; get the address of the handler
                 push        rax                         ; and push it on the stack
                 push        12                          ; set INT12
@@ -359,7 +376,7 @@ IDTInit:
 ; INT13 -- #GP -- General Protection Fault
 ;----------------------------------------------------------------------------------------------
 
-                push        IST6                        ; use IST6
+                push        RSP0                        ; use RSP0
                 mov.q       rax,GP_Fault                ; get the address of the handler
                 push        rax                         ; and push it on the stack
                 push        13                          ; set INT13
@@ -370,7 +387,7 @@ IDTInit:
 ; INT14 -- #PF -- Page Fault
 ;----------------------------------------------------------------------------------------------
 
-                push        IST5                        ; use IST5
+                push        RSP0                        ; use RSP0
                 mov.q       rax,PF_Fault                ; get the address of the handler
                 push        rax                         ; and push it on the stack
                 push        14                          ; set INT14
@@ -382,7 +399,7 @@ IDTInit:
 ; INT16 -- #MF -- FPU Fault
 ;----------------------------------------------------------------------------------------------
 
-                push        IST6                        ; use IST6
+                push        RSP0                        ; use RSP0
                 mov.q       rax,MF_Fault                ; get the address of the handler
                 push        rax                         ; and push it on the stack
                 push        16                          ; set INT16
@@ -393,7 +410,7 @@ IDTInit:
 ; INT17 -- #AC -- Alignment Check Fault
 ;----------------------------------------------------------------------------------------------
 
-                push        IST6                        ; use IST6
+                push        RSP0                        ; use RSP0
                 mov.q       rax,AC_Fault                ; get the address of the handler
                 push        rax                         ; and push it on the stack
                 push        17                          ; set INT17
@@ -404,7 +421,7 @@ IDTInit:
 ; INT18 -- #MC -- Machine Check Abort
 ;----------------------------------------------------------------------------------------------
 
-                push        IST7                        ; use IST7
+                push        IST5                        ; use IST5
                 mov.q       rax,MC_Abort                ; get the address of the handler
                 push        rax                         ; and push it on the stack
                 push        18                          ; set INT18
@@ -415,7 +432,7 @@ IDTInit:
 ; INT19 -- #XM -- SIMD Floating Point Fault
 ;----------------------------------------------------------------------------------------------
 
-                push        IST6                        ; use IST6
+                push        RSP0                        ; use RSP0
                 mov.q       rax,XM_Fault                ; get the address of the handler
                 push        rax                         ; and push it on the stack
                 push        19                          ; set INT19
@@ -1234,25 +1251,24 @@ XM_Fault:
 
                 section     .rodata
 
-DEMsg           db          'HALTING: Divide error (#DE) at'
-RIPMsg          db          ' RIP: ',0
-DBMsg           db          'HALTING: Debug Exception (#DB) with no debugger',13,0
-NMIMsg          db          'RESUMING: Non-Maskable Interrupt (NMI) received',13,0
-BPMsg           db          'RESUMING: Breakpoint Trap (#BP) with no debugger',13,0
-OFMsg           db          'HALTING: Overflow Trap (#OF) received',13,0
-BRMsg           db          'HALTING: BOUND Range Exceeded Fault (#BR) received',13,0
-UDMsg           db          'HALTING: Invalid Opcode Fault (#UD) received',13,0
-NMMsg           db          'HALTING: Device Not Available Fault (#NM) received',13,0
-DFMsg           db          'HALTING: Double Fault Abort (#DF) received',13,0
+DEMsg           db          '              HALTING: Divide error (#DE): ',0
+DBMsg           db          '    HALTING: Debug Exception (#DB) with no debugger: ',0
+NMIMsg          db          '    RESUMING: Non-Maskable Interrupt (NMI) received: ',0
+BPMsg           db          '    RESUMING: Breakpoint Trap (#BP) with no debugger: ',0
+OFMsg           db          '          HALTING: Overflow Trap (#OF) received: ',0
+BRMsg           db          '   HALTING: BOUND Range Exceeded Fault (#BR) received: ',0
+UDMsg           db          '      HALTING: Invalid Opcode Fault (#UD) received: ',0
+NMMsg           db          '   HALTING: Device Not Available Fault (#NM) received: ',0
+DFMsg           db          '       HALTING: Double Fault Abort (#DF) received: ',0
 TSMsg           db          'HALTING: Invalid TSS Fault (#TS) received - seg selector: ',0
-NPMsg           db          'HALTING: Segment Not Present Fault (#NP) received: ',0
-SSMsg           db          'HALTING: Stack Fault (#SS) received: ',0
-GPMsg           db          'HALTING: General Protection Fault (#GP) received: ',0
-PFMsg           db          'HALTING: Page Fault (#PF) received for addr: ',0
-MFMsg           db          'HALTING: x87 FPU Floating Point Fault (#MF) received',13,0
-ACMsg           db          'HALTING: Alignment Check Fault (#AC) received',13,0
-MCMsg           db          'HALTING: Machine Check Abort (#MC) received',13,0
-XMMsg           db          'HALTING: SIMD Floating Point Fault (#XM) received',13,0
+NPMsg           db          '   HALTING: Segment Not Present Fault (#NP) received: ',0
+SSMsg           db          '          HALTING: Stack Fault (#SS) received: ',0
+GPMsg           db          '    HALTING: General Protection Fault (#GP) received: ',0
+PFMsg           db          '          HALTING: Page Fault (#PF) received: ',0
+MFMsg           db          '  HALTING: x87 FPU Floating Point Fault (#MF) received: ',0
+ACMsg           db          '     HALTING: Alignment Check Fault (#AC) received: ',0
+MCMsg           db          '      HALTING: Machine Check Abort (#MC) received: ',0
+XMMsg           db          '     HALTING: SIMD Floating Point Fault (#XM) received: ',0
 
 
 Ext             db          ' (External)',0

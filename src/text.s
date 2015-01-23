@@ -8,7 +8,7 @@
 ;**********************************************************************************************
 ;
 ;       Century-64 is a 64-bit Hobby Operating System written mostly in assembly.
-;       Copyright (C) 2014  Adam Scott Clark
+;       Copyright (C) 2014-2015  Adam Scott Clark
 ;
 ;       This program is free software: you can redistribute it and/or modify
 ;       it under the terms of the GNU General Public License as published by
@@ -35,6 +35,7 @@
 ;   void TextPutString(char *str);
 ;   void TextSetAttr(uint8 attr);
 ;   void TextSetBlockCursor(void);
+;   void TextSetNoCursor(void);
 ;
 ; Internal functions:
 ;   void TextOutputHex(register uint8 b);
@@ -64,6 +65,7 @@
 ;                            above.  Fixed the calculations and all is right again.
 ; 2014/12/23  #205     ADCL  Add the debugging console.
 ; 2014/12/23  #193     ADCL  At the same time as above, clean up the coding standard.
+; 2015/01/04  #191     ADCL  Created a function to hide the cursor
 ;
 ;==============================================================================================
 
@@ -751,6 +753,41 @@ TextSetBlockCursor:
                 inc         dx                      ; move to 6845 data reg
                 pop         rax                     ; get our value back
                 add.d       eax,4                   ; add 4 additional scan lines
+                out         dx,al                   ; set the bottom scan line
+
+                pop         rdx                     ; restore rbx
+                pop         rbx                     ; restore rbx
+                pop         rbp                     ; restore caller's frame
+                ret
+
+;==============================================================================================
+
+;----------------------------------------------------------------------------------------------
+; void TextSetNoCursor(void) -- This function will change the cursor to be invisible
+;----------------------------------------------------------------------------------------------
+
+                global      TextSetNoCursor
+
+TextSetNoCursor:
+                push        rbp                     ; save caller's frame
+                mov.q       rbp,rsp                 ; create our own frame
+                push        rbx                     ; save rbx
+                push        rdx                     ; save rdx
+
+                mov.w       dx,0x3d4                ; set the 6845 control reg
+                mov.b       al,0x0a                 ; set the cursor start register
+                out         dx,al                   ; send the byte fo the 6845
+
+                inc         dx                      ; set the 6845 data register
+                mov.q       rax,5                   ; start on scan line 5 -- arbitrary value
+                out         dx,al                   ; send the byte to the 6845
+
+                mov.w       dx,0x3d4                ; set the 6845 control reg
+                mov.b       al,0x0b                 ; cursor end register
+                out         dx,al                   ; send the byte
+
+                inc         dx                      ; move to 6845 data reg
+                xor.q       rax,rax                 ; clear rax for end to be less than start
                 out         dx,al                   ; set the bottom scan line
 
                 pop         rdx                     ; restore rbx
