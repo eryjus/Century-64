@@ -32,7 +32,7 @@
 ;
 ;==============================================================================================
 
-; %define         DISABLE_DBG_CONSOLE
+%define         DISABLE_DBG_CONSOLE
 
 ;----------------------------------------------------------------------------------------------
 ; -- the following macros are to make coding simpler
@@ -62,6 +62,11 @@
 %define         mov.w       mov word
 %define         mov.d       mov dword
 %define         mov.q       mov qword
+
+%define         neg.b       neg byte
+%define         neg.w       neg word
+%define         neg.d       neg dword
+%define         neg.q       neg qword
 
 %define         not.b       not byte
 %define         not.w       not word
@@ -245,6 +250,9 @@ struc FreeMem
     .len        resd        1                       ; the remaining length of the mmap
 endstruc
 
+MAGIC1          equ         0x2badb002
+MAGIC2          equ         0x36d76289
+
 %ifndef __MBCHECK_S__
                 extern      CheckMB
                 extern      GetMemLimit
@@ -301,6 +309,17 @@ VMM_PF_END      equ         0xffffff7fffefffff
 ;----------------------------------------------------------------------------------------------
 ; -- the following symbols are found in gdt-tss.s
 ;----------------------------------------------------------------------------------------------
+
+BADIST1         equ         0xffffff7fffe01000
+BADIST2         equ         0xffffff7fffe02000
+BADIST3         equ         0xffffff7fffe03000
+BADIST4         equ         0xffffff7fffe04000
+BADIST5         equ         0xffffff7fffe05000
+BADIST6         equ         0xffffff7fffe06000
+BADIST7         equ         0xffffff7fffe07000
+BADRSP0         equ         0xffffff7fffe08000
+BADRSP1         equ         0xffffff7fffe09000
+BADRSP2         equ         0xffffff7fffe0a000
 
 %ifndef __GDT_TSS_S__
                 extern      GDTInit
@@ -496,4 +515,31 @@ endstruc
 ;----------------------------------------------------------------------------------------------
 
                 extern      debugger
+
+;----------------------------------------------------------------------------------------------
+; -- the following symbols are found in mb1.s
+;----------------------------------------------------------------------------------------------
+
+%ifndef __MB1_S__
+                extern      ReadMB1                 ; Read the MB1 info block
+%endif
+
+;----------------------------------------------------------------------------------------------
+; -- the following symbols are found in kprintf.s
+;----------------------------------------------------------------------------------------------
+
+%ifndef __KPRINTF_S__
+                extern      kprintf
+                extern      ksprintf
+                extern      ksnprintf
+                extern      kvprintf
+                extern      kvsprintf
+                extern      kvsnprintf
+                extern      kstrlen
+
+%ifndef DISABLE_DBG_CONSOLE
+                extern      dbgprintf
+                extern      dbgvprintf
+%endif
+%endif
 

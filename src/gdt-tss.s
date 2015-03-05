@@ -500,30 +500,24 @@ NewTSS:
                 add         rax,STACK_SIZE          ; move to the end of the stack
                 mov.q       [rbx+TSS.rsp0],rax      ; store the stack pinter
 
-                xor.q       rax,rax                 ; clear rax
-;                call        AllocStack              ; get a stack
-;                add         rax,STACK_SIZE          ; move to the end of the stack
+                mov.q       rax,BADRSP1             ; set the bad stack value
                 mov.q       [rbx+TSS.rsp1],rax      ; store the stack pinter
 
-;                call        AllocStack              ; get a stack
-;                add         rax,STACK_SIZE          ; move to the end of the stack
+                mov.q       rax,BADRSP2             ; set the bad stack value
                 mov.q       [rbx+TSS.rsp2],rax      ; store the stack pinter
 
                 call        AllocStack              ; get a stack
                 add         rax,STACK_SIZE          ; move to the end of the stack
                 mov.q       [rbx+TSS.ist1],rax      ; store the stack pinter
 
-                xor.q       rax,rax                 ; clear rax
-;                call        AllocStack              ; get a stack
-;                add         rax,STACK_SIZE          ; move to the end of the stack
+                call        AllocStack              ; get a stack
+                add         rax,STACK_SIZE          ; move to the end of the stack
                 mov.q       [rbx+TSS.ist2],rax      ; store the stack pinter
 
-;                call        AllocStack              ; get a stack
-;                add         rax,STACK_SIZE          ; move to the end of the stack
+                mov.q       rax,BADIST3             ; set the bad stack value
                 mov.q       [rbx+TSS.ist3],rax      ; store the stack pinter
 
-;                call        AllocStack              ; get a stack
-;                add         rax,STACK_SIZE          ; move to the end of the stack
+                mov.q       rax,BADIST4             ; set the bad stack value
                 mov.q       [rbx+TSS.ist4],rax      ; store the stack pinter
 
                 call        AllocStack              ; get a stack

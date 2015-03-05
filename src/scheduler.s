@@ -130,7 +130,7 @@
 ; 7) TSwapTgt then executes an iretq to properly drop back into the user process
 ;
 ; So, now the question becomes what to do when we are in an interrupt and the quantum is
-; expired.  In this case, all of the values we need to save are in regs and IST2 stack and we
+; expired.  In this case, all of the values we need to save are in regs and RSP0 stack and we
 ; will want to get them off this stack and onto the user process stack.  However, we only want
 ; to do this if we are actually going to change tasks.  If, for example, we are only executing
 ; the idle task and nothing else is in the queue, then there will be nothing to switch to and
@@ -139,8 +139,8 @@
 ; A) If the quantum is expired, call GetNextProcess to get the next process in the queue
 ; B) If next process == currentProcess, reset the quantum and exit (no need to change) and exit
 ; C) Otherwise, subtract 200 from the User Stack
-; D) Copy SS to RIP from the IST2 to the User Stack
-; E) Copy RBP to GS from registers and the IST2 to the User Stack
+; D) Copy SS to RIP from the RSP0 to the User Stack
+; E) Copy RBP to GS from registers and the RSP0 to the User Stack
 ; F) Put TSwapTgt into [RSP] -- this should take up all the positions on the stack
 ; G) Save RSP and SS in the Process structure
 ; H) Save CR3 in the Process Structure
@@ -306,7 +306,7 @@ SchedulerInit:
 ; now, install the IRQ0 handler and enable the IRQ
 ;----------------------------------------------------------------------------------------------
 
-                mov.q       rax,RSP0                ; we want RSP0
+                mov.q       rax,IST2                ; we want IST2
                 push        rax                     ; push it on the stack
                 mov.q       rax,IRQ0Handler         ; this is our handler address
                 push        rax                     ; push that on the stack
@@ -341,6 +341,13 @@ RdyKernQAdd:
                 push        rbp                     ; save caller's frame
                 mov.q       rbp,rsp                 ; create our own frame
 
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,addKern             ; get the debug string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; call the function to print to console
+                add.q       rsp,8                   ; clean up the stack
+%endif
+
                 mov.q       rax,sched               ; get the scheduler structure address
                 lea.q       rax,[rax+Scheduler.rdyKern] ; get the address of the ready queue
                 push        rax                     ; push that on the stack
@@ -366,6 +373,13 @@ RdyKernQAdd:
 RdyHighQAdd:
                 push        rbp                     ; save caller's frame
                 mov.q       rbp,rsp                 ; create our own frame
+
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,addHigh             ; get the debug string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; call the function to print to console
+                add.q       rsp,8                   ; clean up the stack
+%endif
 
                 mov.q       rax,sched               ; get the scheduler structure address
                 lea.q       rax,[rax+Scheduler.rdyHigh] ; get the address of the ready queue
@@ -393,6 +407,13 @@ RdyNormQAdd:
                 push        rbp                     ; save caller's frame
                 mov.q       rbp,rsp                 ; create our own frame
 
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,addNorm             ; get the debug string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; call the function to print to console
+                add.q       rsp,8                   ; clean up the stack
+%endif
+
                 mov.q       rax,sched               ; get the scheduler structure address
                 lea.q       rax,[rax+Scheduler.rdyNorm] ; get the address of the ready queue
                 push        rax                     ; push that on the stack
@@ -419,6 +440,13 @@ RdyLowQAdd:
                 push        rbp                     ; save caller's frame
                 mov.q       rbp,rsp                 ; create our own frame
 
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,addLow              ; get the debug string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; call the function to print to console
+                add.q       rsp,8                   ; clean up the stack
+%endif
+
                 mov.q       rax,sched               ; get the scheduler structure address
                 lea.q       rax,[rax+Scheduler.rdyLow] ; get the address of the ready queue
                 push        rax                     ; push that on the stack
@@ -444,6 +472,13 @@ RdyLowQAdd:
 RdyIdleQAdd:
                 push        rbp                     ; save caller's frame
                 mov.q       rbp,rsp                 ; create our own frame
+
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,addIdle             ; get the debug string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; call the function to print to console
+                add.q       rsp,8                   ; clean up the stack
+%endif
 
                 mov.q       rax,sched               ; get the scheduler structure address
                 lea.q       rax,[rax+Scheduler.rdyIdle] ; get the address of the ready queue
@@ -483,14 +518,12 @@ SwitchToProcess:
 ;----------------------------------------------------------------------------------------------
 ; get the parameters from the old stack and hold them for later
 ;----------------------------------------------------------------------------------------------
-
                 mov.q       rbx,[rbp+16]            ; get the process address
                 mov.q       rcx,[rbp+24]            ; get the eoi flag
 
 ;----------------------------------------------------------------------------------------------
 ; now, get the CR3, SS, and RSP values from the structure
 ;----------------------------------------------------------------------------------------------
-
                 mov.q       rax,[rbx+Process.cr3]   ; get cr3
                 mov.q       rdi,[rbx+Process.rsp]   ; get rsp
                 mov.q       rdx,[rbx+Process.ss]    ; get ss
@@ -498,15 +531,22 @@ SwitchToProcess:
 ;----------------------------------------------------------------------------------------------
 ; set CR3, and then SS & RSP from registers
 ;----------------------------------------------------------------------------------------------
-
                 mov         cr3,rax                 ; set paging tables
                 mov.w       ss,dx                   ; set the SS
                 mov.q       rsp,rdi                 ; IMMEDIATELY followed by RSP
 
 ;----------------------------------------------------------------------------------------------
+; remove the next process from the ready queue
+;----------------------------------------------------------------------------------------------
+                mov.q       rax,[rbp+16]            ; get the process struct address from stack
+                lea.q       rax,[rax+Process.stsQ]  ; get the address of the queue
+                push        rax                     ; and push it on the stack
+                call        ListDelInit             ; remove it from the list
+                add.q       rsp,8                   ; clean up the stack
+
+;----------------------------------------------------------------------------------------------
 ; do some variable and structure housekeeping
 ;----------------------------------------------------------------------------------------------
-
                 mov.q       rsi,currentProcess      ; get the currentProcess var address
                 mov.q       rax,[rsi]               ; get the actual current process address
 
@@ -523,7 +563,6 @@ SwitchToProcess:
 ;----------------------------------------------------------------------------------------------
 ; now, we have the stack in place for the process we are swapping to.  check for an eoi
 ;----------------------------------------------------------------------------------------------
-
                 cmp.q       rcx,0                   ; are we skipping eoi?
                 je          .out                    ; if so, go straight to exit
 
@@ -578,7 +617,16 @@ GetNextProcess:
 ; currentProcess priority against the scheduler
 ;----------------------------------------------------------------------------------------------
 
-.kern:          lea.q       rax,[rbx+Scheduler.rdyKern] ; get the list for kernel priority
+.kern:
+
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,chkKern             ; get the debug string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; call the function to print to console
+                add.q       rsp,8                   ; clean up the stack
+%endif
+
+                lea.q       rax,[rbx+Scheduler.rdyKern] ; get the list for kernel priority
                 push        rax                     ; push the address on the stack
                 call        ListNext                ; get the next entry, 0 if none
                 add.q       rsp,8                   ; clean up the stack
@@ -596,8 +644,16 @@ GetNextProcess:
 ; and exit returning the running process if that process is a kernel priority.
 ;----------------------------------------------------------------------------------------------
 
-.high:          cmp.b       cl,PTY_KERN             ; is the running process a kernel pty?
+.high:
+                cmp.b       cl,PTY_KERN             ; is the running process a kernel pty?
                 je          .default                ; return the currentProcess
+
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,chkHigh             ; get the debug string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; call the function to print to console
+                add.q       rsp,8                   ; clean up the stack
+%endif
 
                 lea.q       rax,[rbx+Scheduler.rdyHigh] ; get the list for high priority
                 push        rax                     ; push the address on the stack
@@ -617,8 +673,16 @@ GetNextProcess:
 ; it as the next process.  If not, we will check the normal queue.
 ;----------------------------------------------------------------------------------------------
 
-.norm:          cmp.b       cl,PTY_HIGH             ; is the running process a high pty?
+.norm:
+                cmp.b       cl,PTY_HIGH             ; is the running process a high pty?
                 je          .default                ; return the currentProcess
+
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,chkNorm             ; get the debug string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; call the function to print to console
+                add.q       rsp,8                   ; clean up the stack
+%endif
 
                 lea.q       rax,[rbx+Scheduler.rdyNorm] ; get the list for normal priority
                 push        rax                     ; push the address on the stack
@@ -636,8 +700,16 @@ GetNextProcess:
 ; queue.
 ;----------------------------------------------------------------------------------------------
 
-.low:           cmp.b       cl,PTY_NORM             ; is the running process a normal pty?
+.low:
+                cmp.b       cl,PTY_NORM             ; is the running process a normal pty?
                 je          .default                ; return the currentProcess
+
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,chkLow              ; get the debug string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; call the function to print to console
+                add.q       rsp,8                   ; clean up the stack
+%endif
 
                 lea.q       rax,[rbx+Scheduler.rdyLow] ; get the list for low priority
                 push        rax                     ; push the address on the stack
@@ -656,8 +728,16 @@ GetNextProcess:
 ; idle process to run.
 ;----------------------------------------------------------------------------------------------
 
-.idle:          cmp.b       cl,PTY_LOW              ; is the running process a low pty?
+.idle:
+                cmp.b       cl,PTY_LOW              ; is the running process a low pty?
                 je          .default                ; return the currentProcess
+
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,chkIdle             ; get the debug string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; call the function to print to console
+                add.q       rsp,8                   ; clean up the stack
+%endif
 
                 lea.q       rax,[rbx+Scheduler.rdyIdle] ; get the list for kernel priority
                 push        rax                     ; push the address on the stack
@@ -674,13 +754,34 @@ GetNextProcess:
 ; to do.
 ;----------------------------------------------------------------------------------------------
 
-.default:       mov.q       rax,r9                  ; set the return value
+.default:
+
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,dftGetNxtProc       ; get the debug string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; call the function to print to console
+                add.q       rsp,8                   ; clean up the stack
+%endif
+
+                mov.q       rax,r9                  ; set the return value
 
 ;----------------------------------------------------------------------------------------------
 ; clean up and exit
 ;----------------------------------------------------------------------------------------------
 
 .out:
+
+%ifndef DISABLE_DBG_CONSOLE
+                push        rax                     ; we will save rax on the stack
+                lea.q       rax,[rax+Process.name]  ; get the name address
+                push        rax                     ; push it on the stack
+                mov.q       rax,rsltGetNxtProc      ; get the debug string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; call the function to print to console
+                add.q       rsp,16                  ; clean up the stack
+                pop         rax                     ; and get our return value back
+%endif
+
                 pop         r9                      ; restore r9
                 pop         rcx                     ; restore rcx
                 pop         rbx                     ; restore rbx
@@ -700,12 +801,25 @@ GetNextProcess:
 ;----------------------------------------------------------------------------------------------
 
 IRQ0Handler:
+                cmp.q       [rsp+8],8
+                je          .ll
+
+                BREAK
+
+.ll:
                 push        rbp                     ; save the interrupted process's frame
                 mov.q       rbp,rsp                 ; we want our own frame
                 push        rax                     ; yes, we even save rax
                 push        rbx                     ; save rbx
                 push        rsi                     ; save rsi
                 push        rdi                     ; save rdi
+
+                cmp.q       [rbp+40],0x10
+                je          .lll
+
+                BREAK
+
+.lll:
 
                 mov.q       rax,timerCounter        ; get the address of the var
                 inc         qword [rax]             ; increment the counter
@@ -749,7 +863,7 @@ IRQ0Handler:
                 push        rax                     ; save rax
                 mov.q       rax,qtmExpired          ; get the text to write
                 push        rax                     ; push it on the stack
-                call        DbgConsolePutString     ; write it to the debug console
+                call        dbgprintf               ; write it to the debug console
                 add.q       rsp,8                   ; clean up the stack
                 pop         rax                     ; restore rax
 %endif
@@ -762,7 +876,7 @@ IRQ0Handler:
                 push        rax                     ; save rax
                 mov.q       rax,resettingQtm        ; get the var address for the current proc
                 push        rax                     ; push the name on the stack
-                call        DbgConsolePutString     ; put the name to the debug console
+                call        dbgprintf               ; put the name to the debug console
                 add.q       rsp,8                   ; clean up the stack
                 pop         rax                     ; restore rax
 %endif
@@ -777,11 +891,10 @@ IRQ0Handler:
                 mov.q       rax,[rax]               ; get the proc structure address
                 lea.q       rax,[rax+Process.name]  ; get the name
                 push        rax                     ; push the name on the stack
-                call        DbgConsolePutString     ; put the name to the debug console
                 mov.q       rax,hasControl          ; get the rest of the string
-                mov.q       [rsp],rax               ; put that string on the stack
-                call        DbgConsolePutString     ; put the name to the debug console
-                add.q       rsp,8                   ; clean up the stack
+                push        rax                     ; push the name on the stack
+                call        dbgprintf               ; put the name to the debug console
+                add.q       rsp,16                  ; clean up the stack
                 pop         rax                     ; restore rax
 %endif
 
@@ -799,7 +912,7 @@ IRQ0Handler:
 %ifndef DISABLE_DBG_CONSOLE
                 mov.q       rax,swapStart           ; get the address of the message
                 push        rax                     ; push it on the stack
-                call        DbgConsolePutString     ; write it to the screen
+                call        dbgprintf               ; write it to the debug console
                 add.q       rsp,8                   ; clean up the stack
 %endif
 
@@ -867,10 +980,24 @@ IRQ0Handler:
 ;----------------------------------------------------------------------------------------------
 ; Nearly there.  Now we need to save the state of the CR3, SS, and RSP in the process structure
 ;----------------------------------------------------------------------------------------------
-
-                mov.q       rax,[rbp+48]            ; get SS from the stack
+                mov.q       rax,[rbp+40]            ; get SS from the stack
                 mov.q       [rbx+Process.ss],rax    ; set SS into the Process structure
 
+%ifndef DISABLE_DBG_CONSOLE
+                cmp.q       rax,0x10                ; do we ahve a valid ss
+                je          .l                      ; if so, continue on
+
+                push        rax                     ; save rax
+                push        rax                     ; push the value
+                mov.q       rax,ssVal               ; get the string
+                push        rax                     ; push that on the stack
+                call        dbgprintf               ; output the message
+                add.q       rsp,16                  ; clean up the stack
+                pop         rax                     ; restore rax
+
+                BREAK
+.l:
+%endif
                 mov.q       rax,cr3                 ; get CR3
                 mov.q       [rbx+Process.cr3],rax   ; and set it into the Process structure
 
@@ -901,7 +1028,6 @@ IRQ0Handler:
 ;----------------------------------------------------------------------------------------------
 
 .eoi:
-%if 0
 %ifndef DISABLE_DBG_CONSOLE
                 mov.q       rax,currentProcess      ; get the address of the currentProcess
                 mov.q       rax,[rax]               ; get the currentProcess Struct addr
@@ -910,7 +1036,6 @@ IRQ0Handler:
                 push        rbx                     ; save this to the stack
                 call        DbgConsolePutHexByte    ; write it to the screen
                 add.q       rsp,8                   ; clean up the stack
-%endif
 %endif
 
                 push        0                       ; we need to ackowledge EOI for IRQ 0
@@ -952,11 +1077,10 @@ TSwapTgt:
                 mov.q       rax,[rax]               ; get the proc structure address
                 lea.q       rax,[rax+Process.name]  ; get the name
                 push        rax                     ; push the name on the stack
-                call        DbgConsolePutString     ; put the name to the debug console
                 mov.q       rax,hasControl          ; get the rest of the string
-                mov.q       [rsp],rax               ; put that string on the stack
-                call        DbgConsolePutString     ; put the name to the debug console
-                add.q       rsp,8                   ; clean up the stack
+                push        rax                     ; push the name on the stack
+                call        dbgprintf               ; put the name to the debug console
+                add.q       rsp,16                  ; clean up the stack
 %endif
 
                 pop         rax                     ; restore GS from the stack
@@ -998,9 +1122,25 @@ TSwapTgt:
                 section     .rodata
 
 %ifndef DISABLE_DBG_CONSOLE
-hasControl      db          ' has CPU control',13,0
+hasControl      db          'Process %s now has CPU control',13,0
+
 eoiStart        db          'Sending EOI to PIC',13,0
 swapStart       db          'Beginning process swap',13,0
 qtmExpired      db          'Quantum Expired',13,0
 resettingQtm    db          'Resetting Quantum',13,0
+
+rsltGetNxtProc  db          'The resulting process from GetNextProcess() is %s',13,0
+dftGetNxtProc   db          'GetNextProcess() is defaulting to the current process',13,0
+chkKern         db          'Checking Kernel queue...',13,0
+chkHigh         db          'Checking High queue...',13,0
+chkNorm         db          'Checking Normal queue...',13,0
+chkLow          db          'Checking Low queue...',13,0
+chkIdle         db          'Checking Idle queue...',13,0
+addKern         db          'Adding to the Kernel Queue...',13,0
+addHigh         db          'Adding to the High Queue...',13,0
+addNorm         db          'Adding to the Normal Queue...',13,0
+addLow          db          'Adding to the Low Queue...',13,0
+addIdle         db          'Adding to the Idle Queue...',13,0
+
+ssVal           db          'Invalid SS value: %p',13,0
 %endif

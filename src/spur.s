@@ -27,6 +27,7 @@
 ;    Date     Tracker  Pgmr  Description
 ; ----------  -------  ----  ------------------------------------------------------------------
 ; 2014/12/28  Initial  ADCL  Initial version
+; 2015/03/01  #266     ADCL  Found that the spurious interrupt was imporperly using IST2.
 ;
 ;==============================================================================================
 
@@ -64,7 +65,7 @@ SpurInit:       push        rbp                     ; save the caller's frame
 ; register the IRQ handler
 ;----------------------------------------------------------------------------------------------
 
-                mov.q       rax,IST2                ; we want IST2
+                mov.q       rax,RSP0                ; we want RSP0
                 push        rax                     ; push it on the stack
                 mov.q       rax,SpurHandler         ; this is our handler address
                 push        rax                     ; push that on the stack
@@ -107,7 +108,7 @@ SpurHandler:
 %ifndef DISABLE_DBG_CONSOLE
                 mov.q       rax,spurIntRcvd         ; get the text address
                 push        rax                     ; put it on the stack
-                call        DbgConsolePutString     ; write it to the console
+                call        dbgprintf               ; write it to the debug console
                 add.q       rsp,8                   ; clean up the stack
 %endif
                 jmp         .out                    ; go exit
@@ -130,4 +131,4 @@ SpurHandler:
 
                 section     .rodata
 
-spurIntRcvd     db          '(Spurious Interrupt)',0
+spurIntRcvd     db          '((Spurious Interrupt))',0

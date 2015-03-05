@@ -210,18 +210,12 @@ ProcessInit:
 ;----------------------------------------------------------------------------------------------
 ; Report the results
 ;----------------------------------------------------------------------------------------------
-
-%ifndef DISABLE_DEBUG_CONSOLE
-                mov.q       rax,idleProcMsg         ; get the message to print
+%ifndef DISABLE_DBG_CONSOLE
+                push        rbx                     ; push the address of the process
+                mov.q       rax,butlerProcMsg       ; get the message to print
                 push        rax                     ; push is on the stack
-                call        TextPutString           ; write it to the screen
-
-                mov.q       [rsp],rbx               ; set the address on the stack
-                call        TextPutHexQWord         ; write it to the screen
-
-                mov.q       [rsp],13                ; set a <CR> on the stack
-                call        TextPutChar             ; write it to the screen
-                add.q       rsp,8                   ; clean up the stack
+                call        dbgprintf               ; write it to the debug console
+                add.q       rsp,16                  ; clean up the stack
 %endif
 
 ;----------------------------------------------------------------------------------------------
@@ -250,14 +244,127 @@ ReadyProcess:
                 push        rbp                     ; save caller's frame
                 mov.q       rbp,rsp                 ; create our own frame
                 push        rbx                     ; save rbx
+                push        rcx                     ; save rcx
+                push        rdx                     ; save rdx
                 pushfq                              ; save the flags
                 cli                                 ; since we don't want to be interrupted
+
+;----------------------------------------------------------------------------------------------
+; For debugging purposes, show the process we are readying
+;----------------------------------------------------------------------------------------------
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,currentProcess      ; get the var address...
+                mov.q       rax,[rax]               ; and get the process address structure
+                lea.q       rax,[rax+Process.name]  ; and then get the name of the process
+                push        rax                     ; and push it on the stack
+                mov.q       rax,[rbp+16]            ; get the process address we are readying
+                lea.q       rax,[rax+Process.name]  ; and get the name
+                push        rax                     ; and push it on the stack
+                mov.q       rax,readying            ; get the address of the string
+                push        rax                     ; and push it on the stack
+                call        dbgprintf               ; call the function to print to dbg console
+                add.q       rsp,24                  ; clean up the stack
+%endif
+
+;----------------------------------------------------------------------------------------------
+; Perform some initialization
+;----------------------------------------------------------------------------------------------
+                mov.q       rax,[rbp+16]            ; get the address of the Process Structure
+                mov.q       rbx,currentProcess      ; get the addr of the current process var
+                mov.q       rbx,[rbx]               ; now, get the address of the struct
+
+;----------------------------------------------------------------------------------------------
+; Now, we check the priority of the current process against the process we are readying...  If
+; the process we are readying is higher than the current process (this one executing this
+; function call), then we yield and execute a task switch.
+;----------------------------------------------------------------------------------------------
+
+                mov.b       cl,[rax+Process.procPty]; get the new proc pty
+                mov.b       ch,[rbx+Process.procPty]; get the current process pty
+
+                cmp.b       cl,ch                   ; determine which is greater
+                jbe         .ready                  ; if <=, we just put it on the ready queue
+
+;----------------------------------------------------------------------------------------------
+; OK, we have gotten here.  We are going to execute a task swap.  The good news is that we
+; already have our own stack (we don't have a special stack we need to maintain).  So, we just
+; start pushing things to match the expectation.
+;----------------------------------------------------------------------------------------------
+
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,swapping            ; get the address of the string
+                push        rax                     ; and push it on the stack
+                call        dbgprintf               ; call the function to print to dbg console
+                add.q       rsp,8                   ; clean up the stack
+%endif
+
+                xor.q       rax,rax                 ; clear rax
+                mov.w       ax,ss                   ; get the stack seg
+                push        rax                     ; and push it on the stack
+
+                pushfq                              ; save the flags
+
+                xor.q       rax,rax                 ; clear rax
+                mov.w       ax,cs                   ; get the code seg
+                push        rax                     ; and push it on the stack
+
+                mov.q       rax,ReadyProcess.out2   ; get ret addr for when this gets control
+                push        rax                     ; ... again and push it on the stack
+
+                push        rbp                     ; save rbp
+                push        rax                     ; rax contains garbage -- save it anyway
+                push        rbx                     ; save rbx
+                push        rcx                     ; save rcx
+                push        rdx                     ; save rdx
+                push        rsi                     ; save rsi
+                push        rdi                     ; save rdi
+                push        r8                      ; save r8
+                push        r9                      ; save r9
+                push        r10                     ; save r10
+                push        r11                     ; save r11
+                push        r12                     ; save r12
+                push        r13                     ; save r13
+                push        r14                     ; save r14
+                push        r15                     ; save r15
+
+                xor.q       rax,rax                 ; clear rax
+                mov.w       ax,ds                   ; get the ds
+                push        rax                     ; push it on the stack
+
+                mov.w       ax,es                   ; get the es
+                push        rax                     ; push it on the stack
+
+                mov.w       ax,fs                   ; get the fs
+                push        rax                     ; push it on the stack
+
+                mov.w       ax,gs                   ; get the gs
+                push        rax                     ; push it on the stack
+
+                mov.q       rax,TSwapTgt            ; get the Task Swap Target address
+                push        rax                     ; push it on the stack
+
+                xor.q       rax,rax                 ; clear rax
+                mov.w       ax,ss                   ; get the ss
+                mov.q       [rbx+Process.ss],rax    ; save the ss in the current process
+
+                mov.q       rax,cr3                 ; get cr3 register
+                mov.q       [rbx+Process.cr3],rax   ; save it in the process structure
+
+                mov.q       [rbx+Process.rsp],rsp   ; save the rsp register
+
+                push        0                       ; we do not need an EOI
+                push        qword [rbp+16]          ; push the structure we are switching to
+                call        SwitchToProcess         ; go execute the process switch
+
+                ; =================================================
+                ; !!!!!  Control never returns to this point  !!!!!
+                ; =================================================
 
 ;----------------------------------------------------------------------------------------------
 ; remove the process from any queue it might be in
 ;----------------------------------------------------------------------------------------------
 
-                mov.q       rax,[rbp+16]            ; get the address of the Process Structure
+.ready:         mov.q       rax,[rbp+16]            ; get the address of the Process Structure
                 lea.q       rbx,[rax+Process.stsQ]  ; now get address of stsQ list structure
 
                 push        rbx                     ; push this address on the stack
@@ -321,7 +428,16 @@ ReadyProcess:
 
 .out:           add.q       rsp,8                   ; clean up the stack
 
-                popfq                               ; pop the flags from the stack
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,doneReady           ; get the address of the string
+                push        rax                     ; and push it on the stack
+                call        dbgprintf               ; call the function to print to dbg console
+                add.q       rsp,8                   ; clean up the stack
+%endif
+
+.out2:          popfq                               ; pop the flags from the stack
+                pop         rdx                     ; restore rdx
+                pop         rcx                     ; restore rcx
                 pop         rbx                     ; restore rbx
                 pop         rbp                     ; restore caller's frame
                 ret
@@ -375,6 +491,23 @@ ProcessSetPty:
                 push        rbp                     ; save caller's frame
                 mov.q       rbp,rsp                 ; create our own frame
                 push        rbx                     ; save rbx
+
+;----------------------------------------------------------------------------------------------
+; For debugging purposes, show the process we are setting the priority
+;----------------------------------------------------------------------------------------------
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,currentProcess      ; get the var address...
+                mov.q       rax,[rax]               ; and get the process address structure
+                lea.q       rax,[rax+Process.name]  ; and then get the name of the process
+                push        rax                     ; and push it on the stack
+                mov.q       rax,[rbp+16]            ; get the process address we are readying
+                lea.q       rax,[rax+Process.name]  ; and get the name
+                push        rax                     ; and push it on the stack
+                mov.q       rax,setPty              ; get the address of the string
+                push        rax                     ; and push it on the stack
+                call        dbgprintf               ; call the function to print to dbg console
+                add.q       rsp,24                  ; clean up the stack
+%endif
 
 ;----------------------------------------------------------------------------------------------
 ; So, first the sanity check -- make sure the priority we are dealing with is one of the
@@ -469,6 +602,18 @@ CreateProcess:
                 cli                                 ; no interrupts -- atomic next PID access
 
 ;----------------------------------------------------------------------------------------------
+; Create some debugging text for the debug console
+;----------------------------------------------------------------------------------------------
+%ifndef DISABLE_DBG_CONSOLE
+                push        qword [rbp+24]          ; push the starting address
+                push        qword [rbp+16]          ; push the process name
+                mov.q       rax,procCreate          ; get the string to print
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; write the string
+                add.q       rsp,24                  ; clean up the stack
+%endif
+
+;----------------------------------------------------------------------------------------------
 ; First step A) Allocate a new Process structure
 ;----------------------------------------------------------------------------------------------
 
@@ -481,15 +626,30 @@ CreateProcess:
 
                 mov.q       rbx,rax                 ; save the structure in rbx
 
+%ifndef DISABLE_DBG_CONSOLE
+                push        rbx                     ; push the address on the stack
+                mov.q       rax,procAddr            ; get the msg on the stack
+                push        rax                     ; and push it on the stack
+                call        dbgprintf               ; write the string
+                add.q       rsp,16                  ; clean up the stack
+%endif
+
 ;----------------------------------------------------------------------------------------------
 ; Step B) Allocate a stack
 ;----------------------------------------------------------------------------------------------
-
                 call        AllocStack              ; go get a stack
                 cmp.q       rax,0                   ; did we get a stack?
                 je          .out2                   ; if we didn't get a stack, exit
 
                 mov.q       r9,rax                  ; save the stack in r9
+
+%ifndef DISABLE_DBG_CONSOLE
+                push        r9                      ; push the address on the stack
+                mov.q       rax,procStack           ; get the msg on the stack
+                push        rax                     ; and push it on the stack
+                call        dbgprintf               ; write the string
+                add.q       rsp,16                  ; clean up the stack
+%endif
 
 ;----------------------------------------------------------------------------------------------
 ; Step C) Initialize the Process structure
@@ -524,7 +684,7 @@ CreateProcess:
                 mov.b       [rbx+Process.quantum],0 ; no current quantum
                 mov.b       [rbx+Process.fill],0    ; just to be clean
                 mov.q       [rbx+Process.stackAddr],r9  ; save the stack address
-                mov.q       [rbx+Process.ss],ss     ; same stack segment
+                mov.q       [rbx+Process.ss],ss     ; save stack segment
                 mov.q       rax,cr3                 ; get the PML4 address
                 mov.q       [rbx+Process.cr3],rax   ; save that in the structure
 
@@ -609,23 +769,19 @@ CreateProcess:
 ; Report the results
 ;----------------------------------------------------------------------------------------------
 
-%ifndef DISABLE_DEBUG_CONSOLE
-                mov.q       rax,procAddrMsg         ; get the message to print
-                push        rax                     ; push is on the stack
-                call        TextPutString           ; write it to the screen
-
-                mov.q       [rsp],rbx               ; set the address on the stack
-                call        TextPutHexQWord         ; write it to the screen
-
-                mov.q       [rsp],13                ; set a <CR> on the stack
-                call        TextPutChar             ; write it to the screen
-                add.q       rsp,8                   ; clean up the stack
+%ifndef DISABLE_DBG_CONSOLE
+                push        rbx                     ; push the address of the structure
+                lea.q       rax,[rbx+Process.name]  ; get the name of the process
+                push        rax                     ; push it on the stack
+                mov.q       rax,procAddrMsg         ; get the debugging string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; write it to the debug console
+                add.q       rsp,24                  ; clean up the stack
 %endif
 
 ;----------------------------------------------------------------------------------------------
 ; Step I) Ready the process
 ;----------------------------------------------------------------------------------------------
-
                 push        rbx                     ; push process struct addr
                 call        ReadyProcess            ; ready the process
                 add.q       rsp,8                   ; clean up the stack
@@ -648,6 +804,15 @@ CreateProcess:
 ;----------------------------------------------------------------------------------------------
 
 .out:
+
+%ifndef DISABLE_DBG_CONSOLE
+                mov.q       rax,doneCrtProc         ; get the debugging string
+                push        rax                     ; push it on the stack
+                call        dbgprintf               ; write it to the debug console
+                add.q       rsp,8                   ; clean up the stack
+%endif
+                mov.q       rax,rbx                 ; set the return value
+
                 popfq                               ; restore flags
                 pop         r9                      ; restore r9
                 pop         rdi                     ; restore rdi
@@ -719,7 +884,16 @@ EndProc:        cli                                 ; make sure we are not inter
 
 butler          db          'butler',0
 
-%ifndef DISABLE_DEBUG_CONSOLE
-idleProcMsg     db          'idle Process strcuture is located at: ',0
-procAddrMsg     db          'The Process structure is loated at: ',0
+%ifndef DISABLE_DBG_CONSOLE
+butlerProcMsg   db          'butler: The Process strcuture is located at: %p',13,0
+procAddrMsg     db          '%s: The Process structure is loated at: %p',13,0
+readying        db          'Readying %s (%s is the active process)',13,0
+setPty          db          'Setting process priority for %s (%s is the active process)',13,0
+swapping        db          ' (new process is a higher priority; swapping)',13,0
+doneReady       db          'ReadyProcess() is complete',13,0
+doneCrtProc     db          'CreateProcess() is complete',13,0
+
+procCreate      db          'Creating new process %s (starting addr=%p)',13,0
+procAddr        db          '   * process structure address: %p',13,0
+procStack       db          '   * stack address: %p',13,0
 %endif

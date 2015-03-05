@@ -406,7 +406,7 @@ EntryPoint:
 
 .LongOK:
                 mov.w       [edi],(0x0f<<8)|'D'     ; put an "D" on the screen
-                add.d       edi,2                   ; move to the next pos onthe screen
+                add.d       edi,2                   ; move to the next pos on the screen
 
 ;----------------------------------------------------------------------------------------------
 ; Set the flags needed to enter long mode, taking care of #2 above
@@ -544,36 +544,38 @@ StartHigherHalf:
 ;----------------------------------------------------------------------------------------------
 ; Init Memory Managers: Physical, Virtual, Heap
 ;----------------------------------------------------------------------------------------------
-
                 call        PMMInit                 ; initialize the physical frames in PMM
                 call        PMMInit2                ; if more than 32GB memory, we to complete
                 call        HeapInit                ; initialize the heap
                 call        VMMInit                 ; complete init of vmm & get a stack
                 push        rax                     ; we need to save this stack for later
 
+;----------------------------------------------------------------------------------------------
+; From this point on, kprintf() et. al. are available for use...
+;----------------------------------------------------------------------------------------------
                 call        GDTInit                 ; initialize the final GDT and TSSs
                 call        IDTInit                 ; initialize the IDT
 
 ;----------------------------------------------------------------------------------------------
 ; we need to change the stack at the highest call level so we don't lose any return RIP values.
 ;----------------------------------------------------------------------------------------------
-
                 pop         rax                     ; get the stack address back
                 add.q       rax,STACK_SIZE          ; adjust to the top of the stack
                 mov.q       rbx,0x10                ; set the stack selector
                 mov.w       ss,bx                   ; set the ss reg
                 mov.q       rsp,rax                 ; load the new stack pointer
 
+                mov.q       rax,ReadMB1             ; start reading the MB1 header
+                call        rax                     ; this must be a far call
+
 ;----------------------------------------------------------------------------------------------
 ; reclaim the memory we no longer need
 ;----------------------------------------------------------------------------------------------
-
                 call        ReclaimMemory           ; reclaim any available memory
 
 ;----------------------------------------------------------------------------------------------
 ; Now, initialize the process structures and establish the idle process
 ;----------------------------------------------------------------------------------------------
-
                 call        SpurInit                ; initialize the Spurious Interrupt Handler
                 call        SchedulerInit           ; initialize the scheduler
                 call        ProcessInit             ; initialize the current process
@@ -581,7 +583,6 @@ StartHigherHalf:
 ;----------------------------------------------------------------------------------------------
 ; Create the idle process, and maintain it's priority properly
 ;----------------------------------------------------------------------------------------------
-
                 push        0                       ; 0 additional parameters
                 mov.q       rax,idle                ; the starting address
                 push        rax                     ; push it on the stack
@@ -608,7 +609,6 @@ StartHigherHalf:
                 push        rax
                 call        CreateProcess
                 add.q       rsp,24
-
 
                 push        0
                 mov.q       rax,testProcB

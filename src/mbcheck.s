@@ -72,9 +72,6 @@
 %define         __MBCHECK_S__
 %include        'private.inc'
 
-MAGIC1          equ         0x2badb002
-MAGIC2          equ         0x36d76289
-
 DFT_MEM         equ         4*1024*1024*1024
 
 struc MB1

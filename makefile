@@ -58,7 +58,7 @@ OBJ=$(sort $(subst .s,.o,$(subst src/,obj/,$(ASM-SRC))))
 
 .PHONY: commit
 commit: clean
-	read -r -p "Enter the commit message: " MSG && echo $$MSG && git add . && git commit -m "$$MSG" && git push -u origin master
+	read -r -p "Enter the commit message: " MSG && echo $$MSG && git add . -A && git commit -m "$$MSG" && git push -u origin master
 
 .PHONY: iso
 iso: $(TGT-CDROM)

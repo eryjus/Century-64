@@ -83,11 +83,11 @@ DbgConsoleInit:
                 mov.q       rdx,(DBG_PORT+3)        ; we want the LCR port
                 out         dx,al                   ; set the line setup
 
-                mov.b       al,0x00                 ; we don't need a FIFO
+                mov.b       al,0xc7                 ; we don't need a FIFO
                 mov.q       rdx,(DBG_PORT+2)        ; we want the FCR port
                 out         dx,al                   ; set the FIFO parms
 
-                mov.b       al,0x00                 ; we don't want interrupts
+                mov.b       al,0x0b                 ; we don't want interrupts
                 mov.q       rdx,(DBG_PORT+4)        ; we want the MCR port
                 out         dx,al                   ; No interrupts
 
@@ -108,10 +108,9 @@ DbgConsolePutChar:
                 mov.q       rbp,rsp                 ; create our own frame
                 push        rdx                     ; save rdx
 
-                mov.q       rdx,(DBG_PORT+5)        ; we want the LSR
-.loop:          in          al,dx                   ; read the port
-                and.b       al,0x20                 ; mask out the transmit buffer flag
-                cmp.b       al,0                    ; is the transmit buffer empmty?
+.loop:          mov.q       rdx,(DBG_PORT+5)        ; we want the LSR
+                in          al,dx                   ; read the port
+                test.b      al,0x20                 ; mask out the transmit buffer flag
                 jz          .loop                   ; loop until it is empty
 
                 mov.q       rdx,(DBG_PORT+0)        ; we want the serial port

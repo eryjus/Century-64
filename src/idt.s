@@ -110,7 +110,7 @@
 ;  RSP1 -- Unused
 ;  RSP2 -- Unused
 ;  IST1 -- Debugger
-;  IST2 -- Unused
+;  IST2 -- Timer
 ;  IST3 -- Unused
 ;  IST4 -- Unused
 ;  IST5 -- Machine Check (since it can occur during a task swap)
